@@ -1,0 +1,24 @@
+# Generated database — excluded from version control
+data/cards.db
+
+# Local site config (contains target URL — keep private)
+scraper/local_config.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Environment / secrets
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude internal
+.claude/
