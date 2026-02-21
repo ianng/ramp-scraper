@@ -1,9 +1,11 @@
 # Set these in local_config.py (gitignored) — do not hardcode here
 try:
-    from local_config import BASE_URL, CATID
+    from local_config import BASE_URL, CATID, ORG_ID, SEASON_IDS
 except ImportError:
     BASE_URL = "https://your-league-site.com"
     CATID = 0
+    ORG_ID = 0
+    SEASON_IDS = []  # list of season IDs to scrape
 
 DIVISIONS = {
     35372: {"name": "Coed 1",           "type": "coed",   "level": 1},

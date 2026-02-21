@@ -19,7 +19,7 @@ import requests
 from bs4 import BeautifulSoup
 
 import db
-from config import BASE_URL, CATID, DIVISIONS, HEADERS, REQUEST_DELAY
+from config import BASE_URL, CATID, DIVISIONS, HEADERS, REQUEST_DELAY, ORG_ID, SEASON_IDS
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +40,19 @@ def fetch(url: str) -> Optional[BeautifulSoup]:
         return None
 
 
+def fetch_json(url: str) -> Optional[list | dict]:
+    try:
+        resp = session.get(url, timeout=20)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException as exc:
+        print(f"  [WARN] Failed to fetch {url}: {exc}")
+        return None
+    except Exception as exc:
+        print(f"  [WARN] JSON decode error for {url}: {exc}")
+        return None
+
+
 def sleep():
     time.sleep(REQUEST_DELAY)
 
@@ -57,84 +70,40 @@ def gamesheet_url(division_id: int, game_id: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Parsing: games list
+# Games list — fetched via RAMP JSON API
 # ---------------------------------------------------------------------------
 
-def parse_games_list(soup: BeautifulSoup, division_id: int) -> list[dict]:
+def fetch_games_for_division(division_id: int) -> list[dict]:
     """
-    Parse the /division/.../games page.
+    Fetch all games for a division across all configured seasons using the
+    RAMP JSON API: /api/leaguegame/get/{orgId}/{seasonId}/{catId}/{divId}/0/0/
+
     Returns list of dicts with keys:
         game_id, game_number, game_date, location, home_team, away_team, gamesheet_link
     """
     games = []
-
-    # Find all tables that might contain game rows
-    tables = soup.find_all("table")
-    for table in tables:
-        rows = table.find_all("tr")
-        for row in rows:
-            cells = row.find_all(["td", "th"])
-            if not cells:
+    for season_id in SEASON_IDS:
+        url = f"{BASE_URL}/api/leaguegame/get/{ORG_ID}/{season_id}/{CATID}/{division_id}/0/0/"
+        data = fetch_json(url)
+        sleep()
+        if not data:
+            continue
+        for g in data:
+            gid = g.get("GID")
+            if not gid:
                 continue
-
-            # Look for a row that has a gamesheet link — that means it's a game row
-            gamesheet_link = None
-            for cell in cells:
-                a = cell.find("a", href=re.compile(r"/gamesheet/", re.I))
-                if a:
-                    gamesheet_link = urljoin(BASE_URL, a["href"])
-                    # Extract game_id from URL like /division/3935/35372/gamesheet/12345
-                    m = re.search(r"/gamesheet/(\d+)", a["href"])
-                    if m:
-                        game_id = int(m.group(1))
-                    break
-
-            if not gamesheet_link:
-                continue
-
-            text_cells = [c.get_text(strip=True) for c in cells]
-
-            # Try to extract fields from cells — layout varies, so be flexible
-            game_number = ""
-            game_date = ""
-            location = ""
-            home_team = ""
-            away_team = ""
-
-            for i, txt in enumerate(text_cells):
-                # Date: looks like "Jan 15" or "2024-01-15" or "January 15, 2025"
-                if re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b", txt, re.I) or re.match(r"\d{4}-\d{2}-\d{2}", txt):
-                    if not game_date:
-                        game_date = txt
-                    continue
-                # Game number: "#123" or just a short number
-                if re.match(r"^#?\d{1,5}$", txt) and not game_number:
-                    game_number = txt
-                    continue
-
-            # Try to find team names from "Team A vs Team B" or adjacent cells
-            full_text = " ".join(text_cells)
-            vs_match = re.search(r"(.+?)\s+(?:vs\.?|@)\s+(.+?)(?:\s|$)", full_text, re.I)
-            if vs_match:
-                home_team = vs_match.group(1).strip()
-                away_team = vs_match.group(2).strip()
-
-            # Location: look for "Arena" or "Pad" or similar
-            for txt in text_cells:
-                if any(kw in txt.lower() for kw in ["arena", "pad", "centre", "center", "complex", "rink"]):
-                    location = txt
-                    break
-
+            # Strip score suffix from team names e.g. "Continental FC (4)" → "Continental FC"
+            home = re.sub(r'\s*\(\d+\)\s*$', '', g.get("HomeTeamName") or "").strip()
+            away = re.sub(r'\s*\(\d+\)\s*$', '', g.get("AwayTeamName") or "").strip()
             games.append({
-                "game_id": game_id,
-                "game_number": game_number,
-                "game_date": game_date,
-                "location": location,
-                "home_team": home_team,
-                "away_team": away_team,
-                "gamesheet_link": gamesheet_link,
+                "game_id": int(gid),
+                "game_number": str(g.get("gameNumber") or ""),
+                "game_date": g.get("sDateString") or "",
+                "location": g.get("ArenaName") or "",
+                "home_team": home,
+                "away_team": away,
+                "gamesheet_link": f"{BASE_URL}/division/{CATID}/{division_id}/gamesheet/{gid}",
             })
-
     return games
 
 
@@ -175,170 +144,92 @@ def find_printable_url(soup: BeautifulSoup, gamesheet_page_url: str) -> Optional
 
 def parse_misconduct_table(soup: BeautifulSoup) -> list[dict]:
     """
-    Parse the Misconduct Summary table from a gamesheet page.
-    Expected columns (may vary): #, Player, Team, Minute, Reason, Card Type
+    Parse the 'Time of Misconducts' table from a RAMP gamesheet page.
 
-    Also handles inline format like:
-      "Continental FC at 00:00 - #14 Omid Mzaffari for Unsporting Behavior [Yellow]"
+    Each data row is a single cell containing inline text like:
+      "Cozmos 2at 00:00 -#22 Mike Collinsfor Unsporting Behavior [Yellow]"
     """
     misconducts = []
 
-    # Strategy 1: Find a table with a heading containing "Misconduct"
-    for heading in soup.find_all(re.compile(r"^h[1-6]$|^th$|^td$|^caption$")):
-        if "misconduct" in heading.get_text(strip=True).lower():
-            # Walk up to find the containing table
-            table = heading.find_parent("table") or heading.find_next("table")
-            if table:
-                misconducts.extend(_parse_misconduct_table_rows(table))
-                break
-
-    # Strategy 2: Find any table whose header row contains card-related columns
-    if not misconducts:
-        for table in soup.find_all("table"):
-            headers = [th.get_text(strip=True).lower() for th in table.find_all("th")]
-            if any(h in ("yellow", "red", "card", "misconduct", "caution") for h in headers) \
-               or any("yellow" in h or "card" in h or "miscond" in h for h in headers):
-                misconducts.extend(_parse_misconduct_table_rows(table))
-                if misconducts:
-                    break
-
-    # Strategy 3: Scan all text for inline misconduct patterns
-    if not misconducts:
-        text = soup.get_text(separator="\n")
-        for line in text.splitlines():
-            m = re.search(
-                r"#(\d+)\s+([A-Z][a-zA-Z '-]+?)\s+for\s+(.+?)\s+\[(Yellow|Red)\]",
-                line,
-            )
+    # Find the table whose first row header contains "Misconduct"
+    for table in soup.find_all("table"):
+        first_row = table.find("tr")
+        if not first_row:
+            continue
+        header_text = first_row.get_text(strip=True).lower()
+        if "misconduct" not in header_text:
+            continue
+        # Found the right table — parse data rows
+        for row in table.find_all("tr")[1:]:
+            cell_text = row.get_text(strip=True)
+            if not cell_text or "no misconduct" in cell_text.lower():
+                continue
+            m = _parse_misconduct_line(cell_text)
             if m:
-                team_match = re.match(r"^(.+?)\s+at\s+", line)
-                team = team_match.group(1).strip() if team_match else ""
-                min_match = re.search(r"at\s+(\d{2}:\d{2})", line)
-                minute = min_match.group(1) if min_match else ""
-                misconducts.append({
-                    "player_number": m.group(1),
-                    "player_name": m.group(2).strip(),
-                    "team": team,
-                    "minute": minute,
-                    "reason": m.group(3).strip(),
-                    "card_type": m.group(4),
-                })
+                misconducts.append(m)
+        break  # Only one misconduct table per page
 
     return misconducts
 
 
-def _parse_misconduct_table_rows(table) -> list[dict]:
-    rows = table.find_all("tr")
-    if not rows:
-        return []
+# RAMP inline misconduct format:
+#   "{Team}at {MM:SS} -#{num} {Name}for {Reason} [{Yellow|Red}]"
+# Note: no spaces before "at" or "for" — they run directly into the text
+_MISCONDUCT_RE = re.compile(
+    r"^(.+?)at\s+(\d{1,2}:\d{2})\s+-\s*#(\d+)\s+(.+?)for\s+(.+?)\s+\[(Yellow|Red)\]$",
+    re.IGNORECASE,
+)
 
-    # Detect header row
-    header_cells = [th.get_text(strip=True).lower() for th in rows[0].find_all(["th", "td"])]
 
-    # Map column indices
-    col_map = {}
-    for i, h in enumerate(header_cells):
-        if "player" in h and "name" not in col_map.get("player_name", ""):
-            col_map.setdefault("player_name", i)
-        if "#" == h or "num" in h or "number" in h:
-            col_map["player_number"] = i
-        if "team" in h:
-            col_map["team"] = i
-        if "min" in h or "time" in h:
-            col_map["minute"] = i
-        if "reason" in h or "offence" in h or "infraction" in h or "description" in h:
-            col_map["reason"] = i
-        if "card" in h or "type" in h or "yellow" in h or "red" in h:
-            col_map["card_type"] = i
-
-    results = []
-    for row in rows[1:]:
-        cells = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
-        if not cells or all(c == "" for c in cells):
-            continue
-
-        def get(key, default=""):
-            idx = col_map.get(key)
-            if idx is not None and idx < len(cells):
-                return cells[idx]
-            return default
-
-        # Infer card type from colour if not in a dedicated column
-        card_type = get("card_type")
-        if not card_type:
-            row_html = str(row).lower()
-            if "yellow" in row_html:
-                card_type = "Yellow"
-            elif "red" in row_html:
-                card_type = "Red"
-        else:
-            # Normalise
-            if "yellow" in card_type.lower():
-                card_type = "Yellow"
-            elif "red" in card_type.lower():
-                card_type = "Red"
-
-        if not card_type:
-            continue  # Skip rows that clearly aren't misconduct entries
-
-        results.append({
-            "player_number": get("player_number"),
-            "player_name": get("player_name"),
-            "team": get("team"),
-            "minute": get("minute"),
-            "reason": get("reason"),
-            "card_type": card_type,
-        })
-
-    return results
+def _parse_misconduct_line(text: str) -> Optional[dict]:
+    m = _MISCONDUCT_RE.match(text)
+    if not m:
+        return None
+    return {
+        "team":          m.group(1).strip(),
+        "minute":        m.group(2).strip(),
+        "player_number": m.group(3).strip(),
+        "player_name":   m.group(4).strip(),
+        "reason":        m.group(5).strip(),
+        "card_type":     m.group(6).capitalize(),
+    }
 
 
 def parse_suspensions_served(soup: BeautifulSoup) -> list[dict]:
     """
-    Parse the Completed Suspensions table from the gamesheet page.
+    Parse the Completed Suspensions table from a RAMP gamesheet page.
     Returns list of {player_name, team}.
+
+    The last table on the page is headed "No Completed Suspensions" (empty)
+    or contains player rows with Name and Team columns.
     """
     suspensions = []
 
-    # Look for a section/heading labelled "Completed Suspensions" or "Suspensions"
-    for heading in soup.find_all(re.compile(r"^h[1-6]$|^td$|^th$|^caption$")):
-        text = heading.get_text(strip=True).lower()
-        if "complet" in text and "suspend" in text or "suspension" in text:
-            table = heading.find_parent("table") or heading.find_next("table")
-            if table:
-                suspensions.extend(_parse_suspension_rows(table))
-                break
-
-    if not suspensions:
-        for table in soup.find_all("table"):
-            header_text = " ".join(th.get_text(strip=True).lower() for th in table.find_all("th"))
-            if "suspend" in header_text:
-                rows = table.find_all("tr")
-                suspensions.extend(_parse_suspension_rows(table))
-                if suspensions:
-                    break
+    for table in soup.find_all("table"):
+        first_row = table.find("tr")
+        if not first_row:
+            continue
+        header_text = first_row.get_text(strip=True).lower()
+        if "suspend" not in header_text:
+            continue
+        if "no completed" in header_text or "no suspension" in header_text:
+            break  # Explicitly empty — done
+        # Has suspension rows; header columns are Name, Team (or similar)
+        rows = table.find_all("tr")
+        header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(["th", "td"])]
+        name_col = next((i for i, h in enumerate(header_cells) if "name" in h or "player" in h), 0)
+        team_col = next((i for i, h in enumerate(header_cells) if "team" in h), 1)
+        for row in rows[1:]:
+            cells = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
+            if not cells or all(c == "" for c in cells):
+                continue
+            player_name = cells[name_col] if name_col < len(cells) else ""
+            team = cells[team_col] if team_col < len(cells) else ""
+            if player_name:
+                suspensions.append({"player_name": player_name, "team": team})
+        break
 
     return suspensions
-
-
-def _parse_suspension_rows(table) -> list[dict]:
-    rows = table.find_all("tr")
-    if not rows:
-        return []
-    header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(["th", "td"])]
-    player_col = next((i for i, h in enumerate(header_cells) if "player" in h or "name" in h), 0)
-    team_col = next((i for i, h in enumerate(header_cells) if "team" in h), 1)
-
-    results = []
-    for row in rows[1:]:
-        cells = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
-        if not cells or all(c == "" for c in cells):
-            continue
-        player_name = cells[player_col] if player_col < len(cells) else ""
-        team = cells[team_col] if team_col < len(cells) else ""
-        if player_name:
-            results.append({"player_name": player_name, "team": team})
-    return results
 
 
 def parse_printable_gamesheet(soup: BeautifulSoup) -> list[dict]:
@@ -442,15 +333,8 @@ def scrape_division(conn, division_id: int, force: bool = False) -> None:
     name = info.get("name", str(division_id))
     print(f"\n[Division {division_id}] {name}")
 
-    url = games_url(division_id)
-    soup = fetch(url)
-    sleep()
-    if not soup:
-        print("  Could not fetch games list — skipping.")
-        return
-
-    games = parse_games_list(soup, division_id)
-    print(f"  Found {len(games)} games on page.")
+    games = fetch_games_for_division(division_id)
+    print(f"  Found {len(games)} games via API.")
 
     for game in games:
         gid = game["game_id"]
