@@ -4,6 +4,17 @@
 // Set $page_title before including.
 
 $page_title = $page_title ?? 'Misconduct Tracker';
+
+// Active nav detection
+$_nav_page = basename($_SERVER['PHP_SELF'] ?? 'index.php');
+$_nav_view = $_GET['view'] ?? '';
+function nav_active(string $page, string $view = ''): string {
+    global $_nav_page, $_nav_view;
+    if ($page !== $_nav_page) return '';
+    if ($view !== '' && $view !== $_nav_view) return '';
+    if ($view === '' && in_array($_nav_view, ['teams', 'divisions', 'discrepancies'])) return '';
+    return 'text-accent font-semibold';
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -51,9 +62,11 @@ $page_title = $page_title ?? 'Misconduct Tracker';
             Misconduct Tracker
         </a>
         <div class="flex gap-6 text-sm">
-            <a href="index.php" class="hover:text-accent transition-colors">Dashboard</a>
-            <a href="index.php?view=discrepancies" class="hover:text-accent transition-colors">Discrepancies</a>
-            <a href="index.php?view=teams" class="hover:text-accent transition-colors">Team Rankings</a>
+            <a href="index.php" class="hover:text-accent transition-colors <?= nav_active('index.php') ?>">Dashboard</a>
+            <a href="team.php" class="hover:text-accent transition-colors <?= nav_active('team.php') ?>">Teams</a>
+            <a href="division.php" class="hover:text-accent transition-colors <?= nav_active('division.php') ?>">Divisions</a>
+            <a href="index.php?view=teams" class="hover:text-accent transition-colors <?= nav_active('index.php', 'teams') ?>">Discipline Rankings</a>
+            <a href="index.php?view=discrepancies" class="hover:text-accent transition-colors <?= nav_active('index.php', 'discrepancies') ?>">Discrepancies</a>
         </div>
     </div>
 </nav>

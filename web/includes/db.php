@@ -1,5 +1,11 @@
 <?php
-define('DB_PATH', __DIR__ . '/../../data/cards.db');
+define('DB_PATH',       __DIR__ . '/../../data/cards.db');
+define('RAMP_BASE_URL', 'https://fcregina.com');
+define('RAMP_CATID',    3935);
+
+function gamesheet_url(int $division_id, int $game_id): string {
+    return RAMP_BASE_URL . '/division/' . RAMP_CATID . '/' . $division_id . '/gamesheet/' . $game_id;
+}
 
 function get_pdo(): PDO {
     static $pdo = null;

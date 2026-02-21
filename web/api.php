@@ -20,7 +20,7 @@ try {
 
 switch ($action) {
     case 'players':
-        echo json_encode(fetch_players($pdo));
+        echo json_encode(fetch_players($pdo), JSON_THROW_ON_ERROR);
         break;
     case 'stats':
         handle_stats($pdo);
@@ -83,14 +83,21 @@ function fetch_players(PDO $pdo): array {
         $group_by     = "m.player_name";
     }
 
+    // Yellows from games where the player also received a red card are excluded:
+    // those are two-yellow ejections and don't count toward accumulation.
     $sql = "
         SELECT
             m.player_name,
             GROUP_CONCAT(DISTINCT m.team) AS teams,
             {$select_extra},
-            SUM(CASE WHEN m.card_type = 'Yellow' THEN 1 ELSE 0 END) AS yellow_count,
-            SUM(CASE WHEN m.card_type = 'Red'    THEN 1 ELSE 0 END) AS red_count,
-            COUNT(DISTINCT d.id) AS division_count
+            SUM(CASE WHEN m.card_type = 'Yellow'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM misconducts m2
+                          WHERE m2.game_id = m.game_id
+                            AND m2.player_name = m.player_name
+                            AND m2.card_type = 'Red'
+                      ) THEN 1 ELSE 0 END) AS yellow_count,
+            SUM(CASE WHEN m.card_type = 'Red' THEN 1 ELSE 0 END) AS red_count
         FROM misconducts m
         JOIN games g      ON m.game_id     = g.id
         JOIN divisions d  ON g.division_id = d.id
@@ -117,22 +124,6 @@ function fetch_players(PDO $pdo): array {
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
 
-    /* For per_division mode we need a separate is_guest lookup */
-    $guests = [];
-    if ($mode === 'per_division') {
-        $g_stmt = $pdo->query("
-            SELECT m.player_name
-            FROM misconducts m
-            JOIN games g     ON m.game_id     = g.id
-            JOIN divisions d ON g.division_id = d.id
-            GROUP BY m.player_name
-            HAVING COUNT(DISTINCT d.id) >= 2
-        ");
-        foreach ($g_stmt->fetchAll() as $r) {
-            $guests[$r['player_name']] = true;
-        }
-    }
-
     /* ---- Map rows to response objects ---- */
 
     $result = [];
@@ -147,11 +138,9 @@ function fetch_players(PDO $pdo): array {
 
         if ($mode === 'per_division') {
             $divisions = [$row['division_name']];
-            $is_guest  = isset($guests[$row['player_name']]);
         } else {
             $divisions = array_values(array_unique(explode(',', $row['division_names'])));
             sort($divisions);
-            $is_guest = (int) $row['division_count'] >= 2;
         }
 
         $result[] = [
@@ -163,11 +152,48 @@ function fetch_players(PDO $pdo): array {
             'status_class'   => $status['class'],
             'status_label'   => $status['label'],
             'next_threshold' => $next,
-            'is_guest'       => $is_guest,
         ];
     }
 
-    return $result;
+    // ── Compute filtered stats ────────────────────────────────────────────────
+    $stat_yellows = array_sum(array_column($result, 'yellow_count'));
+    $stat_reds    = array_sum(array_column($result, 'red_count'));
+    $stat_susp    = count(array_filter($result, fn($p) => $p['status_class'] === 'status-red'));
+
+    $teams_set = [];
+    $divs_set  = [];
+    foreach ($result as $p) {
+        foreach ($p['teams']     as $t) $teams_set[$t] = true;
+        foreach ($p['divisions'] as $d) $divs_set[$d]  = true;
+    }
+
+    // Games count: scoped to division filters only (ignore team/yellow filters)
+    $gw = ['g.scraped_at IS NOT NULL'];
+    $gp = [];
+    if ($div_type !== 'all') {
+        $gw[] = 'd.type = :div_type';
+        $gp[':div_type'] = $div_type;
+    }
+    if ($division_id !== null) {
+        $gw[] = 'd.division_id = :division_id';
+        $gp[':division_id'] = $division_id;
+    }
+    $gs = $pdo->prepare(
+        "SELECT COUNT(*) FROM games g JOIN divisions d ON g.division_id = d.id WHERE " . implode(' AND ', $gw)
+    );
+    $gs->execute($gp);
+
+    return [
+        'players' => $result,
+        'stats'   => [
+            'total_yellows'  => $stat_yellows,
+            'total_reds'     => $stat_reds,
+            'suspension_due' => $stat_susp,
+            'total_games'    => (int) $gs->fetchColumn(),
+            'total_divs'     => count($divs_set),
+            'total_teams'    => count($teams_set),
+        ],
+    ];
 }
 
 /* ------------------------------------------------------------------ */
@@ -182,17 +208,24 @@ function handle_stats(PDO $pdo): void {
         FROM misconducts
     ")->fetch();
 
-    /* Count players at a suspension threshold (status-red) */
+    /* Count players at a suspension threshold (yellow accumulation or red card) */
     $players = $pdo->query("
-        SELECT player_name,
-               SUM(CASE WHEN card_type = 'Yellow' THEN 1 ELSE 0 END) AS yc
-        FROM misconducts
-        GROUP BY player_name
+        SELECT m.player_name,
+               SUM(CASE WHEN m.card_type = 'Yellow'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM misconducts m2
+                             WHERE m2.game_id = m.game_id
+                               AND m2.player_name = m.player_name
+                               AND m2.card_type = 'Red'
+                         ) THEN 1 ELSE 0 END) AS yc,
+               SUM(CASE WHEN m.card_type = 'Red' THEN 1 ELSE 0 END) AS rc
+        FROM misconducts m
+        GROUP BY m.player_name
     ")->fetchAll();
 
     $suspension_due = 0;
     foreach ($players as $p) {
-        if (yellow_status((int) $p['yc'])['class'] === 'status-red') {
+        if (yellow_status((int) $p['yc'])['class'] === 'status-red' || (int) $p['rc'] > 0) {
             $suspension_due++;
         }
     }
@@ -271,18 +304,25 @@ function handle_teams(PDO $pdo): void {
 function handle_discrepancies(PDO $pdo): void {
     $mode = $_GET['mode'] ?? 'combined';
 
-    /* Pre-filter: only players with 3+ yellows can have a suspension trigger */
+    /* Pre-filter: players with 3+ accumulation yellows OR any red card */
     $stmt = $pdo->query("
         SELECT
             m.player_name,
             GROUP_CONCAT(DISTINCT m.team)  AS teams,
             GROUP_CONCAT(DISTINCT d.name)  AS divisions,
-            SUM(CASE WHEN m.card_type = 'Yellow' THEN 1 ELSE 0 END) AS yc
+            SUM(CASE WHEN m.card_type = 'Yellow'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM misconducts m2
+                          WHERE m2.game_id = m.game_id
+                            AND m2.player_name = m.player_name
+                            AND m2.card_type = 'Red'
+                      ) THEN 1 ELSE 0 END) AS yc,
+            SUM(CASE WHEN m.card_type = 'Red' THEN 1 ELSE 0 END) AS rc
         FROM misconducts m
         JOIN games g      ON m.game_id     = g.id
         JOIN divisions d  ON g.division_id = d.id
         GROUP BY m.player_name
-        HAVING yc >= 3
+        HAVING yc >= 3 OR rc >= 1
         ORDER BY yc DESC
     ");
 
@@ -290,7 +330,7 @@ function handle_discrepancies(PDO $pdo): void {
     foreach ($stmt->fetchAll() as $row) {
         $report = get_compliance_report($pdo, $row['player_name'], $mode);
 
-        if ($report['discrepancy_count'] <= 0) {
+        if ($report['unserved_count'] <= 0) {
             continue;
         }
 
@@ -300,16 +340,16 @@ function handle_discrepancies(PDO $pdo): void {
         sort($divisions);
 
         $result[] = [
-            'name'              => $row['player_name'],
-            'expected_count'    => $report['expected_count'],
-            'served_count'      => max($report['served_count'], $report['printable_count']),
-            'discrepancy_count' => $report['discrepancy_count'],
-            'teams'             => $teams,
-            'divisions'         => $divisions,
+            'name'           => $row['player_name'],
+            'expected_count' => $report['expected_count'],
+            'served_count'   => $report['served_count'],
+            'unserved_count' => $report['unserved_count'],
+            'teams'          => $teams,
+            'divisions'      => $divisions,
         ];
     }
 
-    usort($result, fn($a, $b) => $b['discrepancy_count'] <=> $a['discrepancy_count']);
+    usort($result, fn($a, $b) => $b['unserved_count'] <=> $a['unserved_count']);
 
     echo json_encode($result);
 }
@@ -322,7 +362,7 @@ function handle_export_csv(PDO $pdo): void {
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename="misconducts.csv"');
 
-    $players = fetch_players($pdo);
+    $players = fetch_players($pdo)['players'];
 
     $out = fopen('php://output', 'w');
     fputcsv($out, ['Player', 'Teams', 'Divisions', 'Yellows', 'Reds', 'Status']);

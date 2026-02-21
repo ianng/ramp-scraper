@@ -98,7 +98,7 @@ def fetch_games_for_division(division_id: int) -> list[dict]:
             games.append({
                 "game_id": int(gid),
                 "game_number": str(g.get("gameNumber") or ""),
-                "game_date": g.get("sDateString") or "",
+                "game_date": g.get("sDate") or g.get("sDateString") or "",
                 "location": g.get("ArenaName") or "",
                 "home_team": home,
                 "away_team": away,
@@ -189,7 +189,7 @@ def _parse_misconduct_line(text: str) -> Optional[dict]:
         "team":          m.group(1).strip(),
         "minute":        m.group(2).strip(),
         "player_number": m.group(3).strip(),
-        "player_name":   m.group(4).strip(),
+        "player_name":   re.sub(r'\s*\(AP\)\s*', '', m.group(4)).strip(),
         "reason":        m.group(5).strip(),
         "card_type":     m.group(6).capitalize(),
     }
@@ -197,36 +197,34 @@ def _parse_misconduct_line(text: str) -> Optional[dict]:
 
 def parse_suspensions_served(soup: BeautifulSoup) -> list[dict]:
     """
-    Parse the Completed Suspensions table from a RAMP gamesheet page.
+    Parse the Completed Suspensions section from a RAMP gamesheet page.
     Returns list of {player_name, team}.
 
-    The last table on the page is headed "No Completed Suspensions" (empty)
-    or contains player rows with Name and Team columns.
+    RAMP structure:
+        <h3>Completed Suspensions</h3>
+        <table ...>
+            <tr><td>Player Name</td></tr>   (one row per player)
+            ...
+        </table>
+    Empty case:
+        <table><tr><td>No Completed Suspensions</td></tr></table>
+
+    There is no team column — only the player name is present.
     """
     suspensions = []
 
-    for table in soup.find_all("table"):
-        first_row = table.find("tr")
-        if not first_row:
+    for h3 in soup.find_all("h3"):
+        if "completed suspension" not in h3.get_text(strip=True).lower():
             continue
-        header_text = first_row.get_text(strip=True).lower()
-        if "suspend" not in header_text:
-            continue
-        if "no completed" in header_text or "no suspension" in header_text:
-            break  # Explicitly empty — done
-        # Has suspension rows; header columns are Name, Team (or similar)
-        rows = table.find_all("tr")
-        header_cells = [c.get_text(strip=True).lower() for c in rows[0].find_all(["th", "td"])]
-        name_col = next((i for i, h in enumerate(header_cells) if "name" in h or "player" in h), 0)
-        team_col = next((i for i, h in enumerate(header_cells) if "team" in h), 1)
-        for row in rows[1:]:
-            cells = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
-            if not cells or all(c == "" for c in cells):
+        # Find the immediately following table sibling
+        table = h3.find_next_sibling("table")
+        if not table:
+            break
+        for row in table.find_all("tr"):
+            name = row.get_text(strip=True)
+            if not name or "no completed" in name.lower():
                 continue
-            player_name = cells[name_col] if name_col < len(cells) else ""
-            team = cells[team_col] if team_col < len(cells) else ""
-            if player_name:
-                suspensions.append({"player_name": player_name, "team": team})
+            suspensions.append({"player_name": name, "team": ""})
         break
 
     return suspensions
@@ -282,8 +280,14 @@ def scrape_gamesheet(
     game_id: int,
     division_id: int,
     force: bool,
+    suspensions_only: bool = False,
 ) -> None:
-    """Scrape a single gamesheet and store results in DB."""
+    """Scrape a single gamesheet and store results in DB.
+
+    suspensions_only: if True, skip misconduct parsing and only (re-)load
+                      the Completed Suspensions section.  Misconducts already
+                      in the DB are left untouched.
+    """
     url = gamesheet_url(division_id, game_id)
     print(f"    Fetching gamesheet {game_id} …", end=" ", flush=True)
 
@@ -296,36 +300,30 @@ def scrape_gamesheet(
     if force:
         db.delete_game_data(conn, game_pk)
 
-    # Misconducts
-    misconducts = parse_misconduct_table(soup)
-    for m in misconducts:
-        db.insert_misconduct(
-            conn, game_pk,
-            m["player_name"], m["player_number"],
-            m["team"], m["minute"],
-            m["reason"], m["card_type"],
-        )
+    misconduct_count = 0
+    if not suspensions_only:
+        misconducts = parse_misconduct_table(soup)
+        for m in misconducts:
+            db.insert_misconduct(
+                conn, game_pk,
+                m["player_name"], m["player_number"],
+                m["team"], m["minute"],
+                m["reason"], m["card_type"],
+            )
+        misconduct_count = len(misconducts)
 
     # Suspensions served (on this gamesheet)
     served = parse_suspensions_served(soup)
     for s in served:
         db.insert_suspension_served(conn, game_pk, s["player_name"], s["team"])
 
-    # Printable gamesheet
-    print_url = find_printable_url(soup, url)
-    if print_url:
-        print_soup = fetch(print_url)
-        sleep()
-        if print_soup:
-            printable = parse_printable_gamesheet(print_soup)
-            for p in printable:
-                db.insert_printable_suspension(conn, game_pk, p["player_name"], p["team"])
-
     db.mark_game_scraped(conn, game_id)
     conn.commit()
 
-    card_counts = f"{len(misconducts)} misconducts, {len(served)} suspensions"
-    print(f"OK ({card_counts})")
+    if suspensions_only:
+        print(f"OK ({len(served)} suspensions)")
+    else:
+        print(f"OK ({misconduct_count} misconducts, {len(served)} suspensions)")
 
 
 def scrape_division(conn, division_id: int, force: bool = False) -> None:
@@ -357,6 +355,81 @@ def scrape_division(conn, division_id: int, force: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Targeted suspension rescrape
+# ---------------------------------------------------------------------------
+
+def cmd_rescrape_suspensions(conn) -> None:
+    """
+    Re-scrape only the 'Completed Suspensions' section for games that
+    could contain suspension-served entries — i.e. games whose RAMP game_id
+    is >= the earliest game where any player triggered a threshold.
+
+    Misconduct data already in the DB is left untouched; only
+    suspensions_served rows are refreshed.
+    """
+    from collections import defaultdict
+
+    # Load all yellows per player ordered by game_id (proxy for chronology)
+    rows = conn.execute("""
+        SELECT m.player_name, g.game_id
+        FROM misconducts m
+        JOIN games g ON m.game_id = g.id
+        WHERE m.card_type = 'Yellow'
+        ORDER BY m.player_name, g.game_id ASC
+    """).fetchall()
+
+    if not rows:
+        print("No yellow card data in DB — run a full scrape first.")
+        return
+
+    # Find the first game_id where each player hit a threshold (3, 5, 7+)
+    player_games: dict[str, list[int]] = defaultdict(list)
+    for row in rows:
+        player_games[row["player_name"]].append(row["game_id"])
+
+    trigger_game_ids: list[int] = []
+    for name, game_ids in player_games.items():
+        for i, gid in enumerate(game_ids):
+            count = i + 1
+            if count == 3 or count == 5 or count >= 7:
+                trigger_game_ids.append(gid)
+                break  # Only need the first trigger per player
+
+    if not trigger_game_ids:
+        print("No players have hit a suspension threshold yet.")
+        return
+
+    min_trigger_gid = min(trigger_game_ids)
+    print(f"Earliest suspension trigger at RAMP game_id {min_trigger_gid}.")
+
+    # All games at or after that trigger
+    games = conn.execute("""
+        SELECT g.id AS pk, g.game_id, d.division_id AS ext_div_id
+        FROM games g
+        JOIN divisions d ON g.division_id = d.id
+        WHERE g.game_id >= ?
+        ORDER BY g.game_id ASC
+    """, (min_trigger_gid,)).fetchall()
+
+    print(f"Games to check: {len(games)} (out of {conn.execute('SELECT COUNT(*) FROM games').fetchone()[0]} total)")
+
+    for game in games:
+        db.clear_suspension_data(conn, game["pk"])
+        conn.commit()
+        scrape_gamesheet(
+            conn,
+            game["pk"],
+            game["game_id"],
+            game["ext_div_id"],
+            force=False,
+            suspensions_only=True,
+        )
+
+    print("\nSuspension rescrape complete.")
+    cmd_status()
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -374,6 +447,11 @@ def main() -> None:
     parser.add_argument("--full", action="store_true", help="Force re-scrape all games")
     parser.add_argument("--division", type=int, metavar="DIV_ID", help="Scrape a single division")
     parser.add_argument("--status", action="store_true", help="Show DB stats and exit")
+    parser.add_argument(
+        "--rescrape-suspensions", action="store_true",
+        help="Re-scrape only the suspensions section for games at/after the earliest "
+             "suspension trigger. Much faster than --full; use after fixing the parser.",
+    )
     args = parser.parse_args()
 
     db.init_db()
@@ -385,7 +463,9 @@ def main() -> None:
     conn = db.get_connection()
 
     try:
-        if args.division:
+        if args.rescrape_suspensions:
+            cmd_rescrape_suspensions(conn)
+        elif args.division:
             if args.division not in DIVISIONS:
                 print(f"Unknown division ID {args.division}. Valid IDs: {list(DIVISIONS)}")
                 sys.exit(1)

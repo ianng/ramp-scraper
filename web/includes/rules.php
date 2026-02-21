@@ -41,22 +41,26 @@ function calculate_expected_suspensions(array $yellows): array {
 
 /**
  * Return the status colour class and label for a given yellow count.
+ *
+ * Note: suspensions are enforced via a monthly league report, not automatically
+ * after the next game. "Triggered" means the threshold was reached; whether the
+ * suspension has been served yet depends on when the league ran its report.
  */
 function yellow_status(int $yellows): array {
     if ($yellows >= 7) {
-        return ['class' => 'status-red',    'label' => 'Suspension Due (Rule 7.3)'];
+        return ['class' => 'status-red',    'label' => 'Suspension Triggered (Rule 7.3)'];
     }
     if ($yellows === 6) {
         return ['class' => 'status-amber',  'label' => 'Warning — 1 from Rule 7.3'];
     }
     if ($yellows >= 5) {
-        return ['class' => 'status-red',    'label' => 'Suspension Due (Rule 7.2)'];
+        return ['class' => 'status-red',    'label' => 'Suspension Triggered (Rule 7.2)'];
     }
     if ($yellows === 4) {
         return ['class' => 'status-amber',  'label' => 'Warning — 1 from Rule 7.2'];
     }
     if ($yellows >= 3) {
-        return ['class' => 'status-red',    'label' => 'Suspension Due (Rule 7.1)'];
+        return ['class' => 'status-red',    'label' => 'Suspension Triggered (Rule 7.1)'];
     }
     if ($yellows === 2) {
         return ['class' => 'status-amber',  'label' => 'Warning — 1 from Rule 7.1'];
@@ -84,6 +88,18 @@ function yellows_until_next(int $yellows): ?int {
  * @param int|null $division_id  Only relevant when mode='per_division'
  */
 function get_player_yellows(PDO $pdo, string $player_name, string $mode = 'combined', ?int $division_id = null): array {
+    // Exclude yellows from games where this player also received a red card:
+    // those are two-yellow ejections, which carry their own automatic suspension
+    // and do NOT count toward the yellow accumulation totals.
+    $red_game_subq = "
+        NOT EXISTS (
+            SELECT 1 FROM misconducts m2
+            WHERE m2.game_id = m.game_id
+              AND m2.player_name = m.player_name
+              AND m2.card_type = 'Red'
+        )
+    ";
+
     if ($mode === 'per_division' && $division_id !== null) {
         $sql = "
             SELECT m.*, g.game_date, g.game_id, g.game_number,
@@ -94,7 +110,8 @@ function get_player_yellows(PDO $pdo, string $player_name, string $mode = 'combi
             WHERE m.player_name = :name
               AND m.card_type = 'Yellow'
               AND d.division_id = :div_id
-            ORDER BY g.game_date ASC, g.game_id ASC
+              AND $red_game_subq
+            ORDER BY g.game_date ASC
         ";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([':name' => $player_name, ':div_id' => $division_id]);
@@ -107,7 +124,8 @@ function get_player_yellows(PDO $pdo, string $player_name, string $mode = 'combi
             JOIN divisions d ON g.division_id = d.id
             WHERE m.player_name = :name
               AND m.card_type = 'Yellow'
-            ORDER BY g.game_date ASC, g.game_id ASC
+              AND $red_game_subq
+            ORDER BY g.game_date ASC
         ";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([':name' => $player_name]);
@@ -131,6 +149,24 @@ function get_player_reds(PDO $pdo, string $player_name): array {
     ");
     $stmt->execute([':name' => $player_name]);
     return $stmt->fetchAll();
+}
+
+/**
+ * Each red card (including ejection via two yellows) carries an automatic
+ * 1-match suspension, separate from yellow card accumulation.
+ *
+ * @param  array $reds  As returned by get_player_reds()
+ * @return array        Each element: ['trigger_game', 'rule' => 'Red Card']
+ */
+function calculate_red_card_suspensions(array $reds): array {
+    $suspensions = [];
+    foreach ($reds as $red) {
+        $suspensions[] = [
+            'trigger_game' => $red,
+            'rule'         => 'Red Card',
+        ];
+    }
+    return $suspensions;
 }
 
 /**
@@ -175,23 +211,31 @@ function get_player_printable_suspensions(PDO $pdo, string $player_name): array 
  */
 function get_compliance_report(PDO $pdo, string $player_name, string $mode = 'combined'): array {
     $yellows = get_player_yellows($pdo, $player_name, $mode);
-    $expected = calculate_expected_suspensions($yellows);
+    $reds    = get_player_reds($pdo, $player_name);
+
+    $expected_yellow = calculate_expected_suspensions($yellows);
+    $expected_red    = calculate_red_card_suspensions($reds);
+
     $served = get_player_suspensions_served($pdo, $player_name);
-    $printable = get_player_printable_suspensions($pdo, $player_name);
 
-    $served_count    = count($served);
-    $printable_count = count($printable);
-    $expected_count  = count($expected);
+    $served_count   = count($served);
+    $expected_count = count($expected_yellow) + count($expected_red);
 
-    $max_recorded = max($served_count, $printable_count);
-    $discrepancies = $expected_count - $max_recorded;
+    // Unserved = suspensions triggered but not yet recorded as served.
+    // Because the league enforces suspensions via a monthly report (not after
+    // each individual game), unserved suspensions may simply be pending the
+    // next report rather than definitively missed.  We expose both the raw
+    // count and a flag so the UI can present this appropriately.
+    $unserved = max(0, $expected_count - $served_count);
 
     return [
-        'expected_suspensions' => $expected,
-        'expected_count'       => $expected_count,
-        'served_count'         => $served_count,
-        'printable_count'      => $printable_count,
-        'discrepancy_count'    => max(0, $discrepancies),
-        'fully_compliant'      => $discrepancies <= 0,
+        'expected_suspensions'     => $expected_yellow,
+        'expected_red_suspensions' => $expected_red,
+        'expected_yellow_count'    => count($expected_yellow),
+        'expected_red_count'       => count($expected_red),
+        'expected_count'           => $expected_count,
+        'served_count'             => $served_count,
+        'unserved_count'           => $unserved,
+        'fully_compliant'          => $unserved === 0,
     ];
 }

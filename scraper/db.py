@@ -175,6 +175,12 @@ def delete_game_data(conn: sqlite3.Connection, game_pk: int) -> None:
     conn.execute("UPDATE games SET scraped_at = NULL WHERE id = ?", (game_pk,))
 
 
+def clear_suspension_data(conn: sqlite3.Connection, game_pk: int) -> None:
+    """Remove only suspension rows for a game, leaving misconducts intact."""
+    conn.execute("DELETE FROM suspensions_served WHERE game_id = ?", (game_pk,))
+    conn.execute("UPDATE games SET scraped_at = NULL WHERE id = ?", (game_pk,))
+
+
 def get_stats(conn: sqlite3.Connection) -> dict:
     stats = {}
     stats["divisions"] = conn.execute("SELECT COUNT(*) FROM divisions").fetchone()[0]
