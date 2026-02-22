@@ -405,6 +405,7 @@ foreach ($player_yellow_counts as $row) {
                 <th class="px-4 py-3 text-center">Reds</th>
                 <th class="px-4 py-3 text-left">Suspension Status</th>
                 <th class="px-4 py-3 text-center">Next Threshold</th>
+                <th class="px-4 py-3 text-left">Served</th>
             </tr>
         </thead>
         <tbody id="player-tbody" class="divide-y divide-gray-100">
@@ -428,6 +429,14 @@ $players = $pdo->query("
     ORDER BY yellows DESC, reds DESC, m.player_name ASC
 ")->fetchAll();
 
+// Pre-compute compliance for players at or past a suspension threshold.
+// Stored here so it can be reused by the table rows AND the alerts panel below.
+$susp_map = [];
+foreach ($players as $_p) {
+    if ((int)$_p['yellows'] < 3 && (int)$_p['reds'] === 0) continue;
+    $susp_map[$_p['player_name']] = get_compliance_report($pdo, $_p['player_name'], 'combined');
+}
+
 foreach ($players as $p):
     $yellows = (int)$p['yellows'];
     $reds    = (int)$p['reds'];
@@ -446,6 +455,16 @@ foreach ($players as $p):
                 <td class="px-4 py-2 text-center font-semibold text-red-600" data-label="Red"><?= $reds ?></td>
                 <td class="px-4 py-2" data-label="Status"><?= $status['label'] ?></td>
                 <td class="px-4 py-2 text-center" data-label="Next"><?= $next !== null ? $next . ' away' : '—' ?></td>
+                <?php $rpt = $susp_map[$p['player_name']] ?? null; ?>
+                <td class="px-4 py-2" data-label="Served">
+                    <?php if (!$rpt || $rpt['expected_count'] === 0): ?>
+                        <span class="text-gray-400">—</span>
+                    <?php elseif ($rpt['fully_compliant']): ?>
+                        <span class="text-green-700 font-medium">&#10003; Served</span>
+                    <?php else: ?>
+                        <span class="text-red-600 font-semibold"><?= $rpt['unserved_count'] ?> unserved</span>
+                    <?php endif; ?>
+                </td>
             </tr>
 <?php endforeach; ?>
         </tbody>
@@ -456,18 +475,14 @@ foreach ($players as $p):
 <?php
 $alerts = [];
 foreach ($players as $p) {
-    $yellows = (int)$p['yellows'];
-    $reds    = (int)$p['reds'];
-    if ($yellows < 3 && $reds === 0) continue;
-    $report = get_compliance_report($pdo, $p['player_name'], 'combined');
-    if ($report['unserved_count'] > 0) {
-        $alerts[] = [
-            'player'   => $p['player_name'],
-            'unserved' => $report['unserved_count'],
-            'expected' => $report['expected_count'],
-            'served'   => $report['served_count'],
-        ];
-    }
+    $report = $susp_map[$p['player_name']] ?? null;
+    if (!$report || $report['unserved_count'] <= 0) continue;
+    $alerts[] = [
+        'player'   => $p['player_name'],
+        'unserved' => $report['unserved_count'],
+        'expected' => $report['expected_count'],
+        'served'   => $report['served_count'],
+    ];
 }
 usort($alerts, fn($a, $b) => $b['unserved'] <=> $a['unserved']);
 ?>
@@ -735,6 +750,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <td class="px-4 py-2 text-center font-semibold text-red-600" data-label="Red">${p.red_count}</td>
                 <td class="px-4 py-2" data-label="Status">${esc(p.status_label)}</td>
                 <td class="px-4 py-2 text-center" data-label="Next">${p.next_threshold !== null ? p.next_threshold + ' away' : '—'}</td>
+                <td class="px-4 py-2" data-label="Served"><span class="${esc(p.served_class)}">${esc(p.served_label)}</span></td>
             </tr>`;
         }).join('');
     }

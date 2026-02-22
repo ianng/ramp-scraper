@@ -143,6 +143,23 @@ function fetch_players(PDO $pdo): array {
             sort($divisions);
         }
 
+        if ($yellows >= 3 || $reds > 0) {
+            $rpt = get_compliance_report($pdo, $row['player_name'], 'combined');
+            if ($rpt['expected_count'] === 0) {
+                $served_label = '—';
+                $served_class = 'text-gray-400';
+            } elseif ($rpt['fully_compliant']) {
+                $served_label = '✓ Served';
+                $served_class = 'text-green-700 font-medium';
+            } else {
+                $served_label = $rpt['unserved_count'] . ' unserved';
+                $served_class = 'text-red-600 font-semibold';
+            }
+        } else {
+            $served_label = '—';
+            $served_class = 'text-gray-400';
+        }
+
         $result[] = [
             'name'           => $row['player_name'],
             'teams'          => $teams,
@@ -152,6 +169,8 @@ function fetch_players(PDO $pdo): array {
             'status_class'   => $status['class'],
             'status_label'   => $status['label'],
             'next_threshold' => $next,
+            'served_label'   => $served_label,
+            'served_class'   => $served_class,
         ];
     }
 
