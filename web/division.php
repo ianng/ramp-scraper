@@ -126,12 +126,26 @@ $page_title = $div_info
     ? htmlspecialchars($div_info['name']) . ' — Divisions'
     : 'Divisions';
 require_once __DIR__ . '/includes/header.php';
+$sidebar_open = ($div_id === 0);
 ?>
+
+<!-- Sidebar toggle (mobile only) -->
+<button id="sidebar-toggle" class="md:hidden w-full flex items-center justify-between bg-white rounded-lg shadow px-3 py-2.5 mb-3 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+    <span class="flex items-center gap-2">
+        <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+        </svg>
+        Browse Divisions
+    </span>
+    <svg id="sidebar-chevron" class="w-4 h-4 text-gray-400 transition-transform <?= $sidebar_open ? 'rotate-180' : '' ?>" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+    </svg>
+</button>
 
 <div class="flex flex-col md:flex-row gap-6">
 
 <!-- ── Sidebar ─────────────────────────────────────────────────────────────── -->
-<aside class="md:w-56 shrink-0">
+<aside id="div-sidebar" class="<?= $sidebar_open ? '' : 'hidden' ?> md:block md:w-56 shrink-0">
     <div class="bg-white rounded-lg shadow overflow-hidden">
         <div class="bg-primary text-white px-3 py-2 text-xs font-semibold uppercase tracking-wide">
             All Divisions
@@ -164,9 +178,11 @@ require_once __DIR__ . '/includes/header.php';
 <?php if (!$div_info): ?>
 <!-- Empty state -->
 <div class="bg-white rounded-lg shadow p-16 text-center text-gray-300">
-    <div class="text-5xl mb-4 font-thin">&larr;</div>
+    <div class="hidden md:block text-5xl mb-4 font-thin">&larr;</div>
+    <div class="md:hidden text-3xl mb-4">&uarr;</div>
     <p class="text-lg font-medium text-gray-400">Select a division</p>
-    <p class="text-sm mt-1">Team standings · Top players · Volatile games</p>
+    <p class="text-sm mt-1 hidden md:block">Team standings · Top players · Volatile games</p>
+    <p class="text-sm mt-1 md:hidden">Tap "Browse Divisions" above</p>
 </div>
 
 <?php elseif ($div_id > 0 && !$div_info): ?>
@@ -337,6 +353,15 @@ require_once __DIR__ . '/includes/header.php';
 <?php endif; ?>
 </div><!-- /main panel -->
 </div><!-- /flex layout -->
+
+<script>
+document.getElementById('sidebar-toggle').addEventListener('click', function() {
+    const sidebar = document.getElementById('div-sidebar');
+    const chevron = document.getElementById('sidebar-chevron');
+    sidebar.classList.toggle('hidden');
+    chevron.classList.toggle('rotate-180');
+});
+</script>
 
 </main>
 </body>

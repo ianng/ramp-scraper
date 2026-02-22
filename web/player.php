@@ -158,7 +158,7 @@ $comp_class = $comp['fully_compliant'] ? 'bg-green-50 border-green-400 text-gree
         <?php if (empty($yellows)): ?>
             <p class="text-gray-500 italic">No yellow cards recorded.</p>
         <?php else: ?>
-            <div class="bg-white rounded-lg shadow overflow-hidden">
+            <div class="bg-white rounded-lg shadow overflow-x-auto">
                 <table class="w-full text-sm">
                     <thead class="bg-gray-100">
                         <tr>
@@ -211,7 +211,7 @@ $comp_class = $comp['fully_compliant'] ? 'bg-green-50 border-green-400 text-gree
                 <?php if (empty($yellows)): ?>
                     <p class="text-gray-500 italic">No yellows in this division.</p>
                 <?php else: ?>
-                    <div class="bg-white rounded-lg shadow overflow-hidden mb-4">
+                    <div class="bg-white rounded-lg shadow overflow-x-auto mb-4">
                         <table class="w-full text-sm">
                             <thead class="bg-gray-100">
                                 <tr>

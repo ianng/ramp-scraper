@@ -440,12 +440,12 @@ foreach ($players as $p):
                         <?= htmlspecialchars($p['player_name']) ?>
                     </a>
                 </td>
-                <td class="px-4 py-2"><?= htmlspecialchars($p['teams']) ?></td>
-                <td class="px-4 py-2 text-xs"><?= htmlspecialchars($p['divisions']) ?></td>
-                <td class="px-4 py-2 text-center font-semibold text-amber-600"><?= $yellows ?></td>
-                <td class="px-4 py-2 text-center font-semibold text-red-600"><?= $reds ?></td>
-                <td class="px-4 py-2"><?= $status['label'] ?></td>
-                <td class="px-4 py-2 text-center"><?= $next !== null ? $next . ' away' : '—' ?></td>
+                <td class="px-4 py-2" data-label="Team"><?= htmlspecialchars($p['teams']) ?></td>
+                <td class="px-4 py-2 text-xs" data-label="Division"><?= htmlspecialchars($p['divisions']) ?></td>
+                <td class="px-4 py-2 text-center font-semibold text-amber-600" data-label="Yellow"><?= $yellows ?></td>
+                <td class="px-4 py-2 text-center font-semibold text-red-600" data-label="Red"><?= $reds ?></td>
+                <td class="px-4 py-2" data-label="Status"><?= $status['label'] ?></td>
+                <td class="px-4 py-2 text-center" data-label="Next"><?= $next !== null ? $next . ' away' : '—' ?></td>
             </tr>
 <?php endforeach; ?>
         </tbody>
@@ -729,12 +729,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 <td class="px-4 py-2 font-medium">
                     <a href="player.php?name=${encodeURIComponent(p.name)}" class="text-primary hover:underline">${esc(p.name)}</a>
                 </td>
-                <td class="px-4 py-2">${esc(p.teams.join(', '))}</td>
-                <td class="px-4 py-2 text-xs">${esc(p.divisions.join(', '))}</td>
-                <td class="px-4 py-2 text-center font-semibold text-amber-600">${p.yellow_count}</td>
-                <td class="px-4 py-2 text-center font-semibold text-red-600">${p.red_count}</td>
-                <td class="px-4 py-2">${esc(p.status_label)}</td>
-                <td class="px-4 py-2 text-center">${p.next_threshold !== null ? p.next_threshold + ' away' : '—'}</td>
+                <td class="px-4 py-2" data-label="Team">${esc(p.teams.join(', '))}</td>
+                <td class="px-4 py-2 text-xs" data-label="Division">${esc(p.divisions.join(', '))}</td>
+                <td class="px-4 py-2 text-center font-semibold text-amber-600" data-label="Yellow">${p.yellow_count}</td>
+                <td class="px-4 py-2 text-center font-semibold text-red-600" data-label="Red">${p.red_count}</td>
+                <td class="px-4 py-2" data-label="Status">${esc(p.status_label)}</td>
+                <td class="px-4 py-2 text-center" data-label="Next">${p.next_threshold !== null ? p.next_threshold + ' away' : '—'}</td>
             </tr>`;
         }).join('');
     }
