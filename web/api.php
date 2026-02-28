@@ -71,7 +71,8 @@ function fetch_players(PDO $pdo): array {
         $params[':team']   = '%' . $team_search . '%';
     }
 
-    $where_clause = $where ? 'WHERE ' . implode(' AND ', $where) : '';
+    $where[] = "m.player_name != 'Bench Penalty'";
+    $where_clause = 'WHERE ' . implode(' AND ', $where);
 
     /* ---- Build the aggregation query ---- */
 
@@ -85,6 +86,7 @@ function fetch_players(PDO $pdo): array {
 
     // Yellows from games where the player also received a red card are excluded:
     // those are two-yellow ejections and don't count toward accumulation.
+    $w_sql = weight_sql();
     $sql = "
         SELECT
             m.player_name,
@@ -97,7 +99,8 @@ function fetch_players(PDO $pdo): array {
                             AND m2.player_name = m.player_name
                             AND m2.card_type = 'Red'
                       ) THEN 1 ELSE 0 END) AS yellow_count,
-            SUM(CASE WHEN m.card_type = 'Red' THEN 1 ELSE 0 END) AS red_count
+            SUM(CASE WHEN m.card_type = 'Red' THEN 1 ELSE 0 END) AS red_count,
+            SUM($w_sql) AS danger_weight
         FROM misconducts m
         JOIN games g      ON m.game_id     = g.id
         JOIN divisions d  ON g.division_id = d.id
@@ -166,6 +169,7 @@ function fetch_players(PDO $pdo): array {
             'divisions'      => $divisions,
             'yellow_count'   => $yellows,
             'red_count'      => $reds,
+            'danger_score'   => round((float)($row['danger_weight'] ?? 0), 1),
             'status_class'   => $status['class'],
             'status_label'   => $status['label'],
             'next_threshold' => $next,
@@ -282,20 +286,26 @@ function handle_teams(PDO $pdo): void {
 
     $where_clause = $where ? 'WHERE ' . implode(' AND ', $where) : '';
 
+    $w = weight_sql();
     $sql = "
         SELECT
             m.team,
             d.name AS division,
-            SUM(CASE WHEN m.card_type = 'Yellow' THEN 1 ELSE 0 END) AS yellow_count,
-            SUM(CASE WHEN m.card_type = 'Red'    THEN 1 ELSE 0 END) AS red_count,
-            COUNT(*)                       AS total_cards,
-            COUNT(DISTINCT m.player_name)  AS unique_players
+            SUM(CASE WHEN m.card_type='Yellow' AND m.player_name != 'Bench Penalty' THEN 1 ELSE 0 END) AS yellows,
+            SUM(CASE WHEN m.card_type='Red'    AND m.player_name != 'Bench Penalty' THEN 1 ELSE 0 END) AS reds,
+            SUM(CASE WHEN m.card_type='Yellow' AND m.player_name  = 'Bench Penalty' THEN 1 ELSE 0 END) AS bench_yellows,
+            SUM(CASE WHEN m.card_type='Red'    AND m.player_name  = 'Bench Penalty' THEN 1 ELSE 0 END) AS bench_reds,
+            COUNT(*)                                                                                     AS total_cards,
+            COUNT(DISTINCT CASE WHEN m.player_name != 'Bench Penalty' THEN m.player_name END)           AS unique_players,
+            SUM($w)                                                                                      AS discipline_weight,
+            (SELECT COUNT(*) FROM games g2
+             WHERE (g2.home_team = m.team OR g2.away_team = m.team)
+               AND g2.division_id = d.id)                                                               AS games_played
         FROM misconducts m
         JOIN games g      ON m.game_id     = g.id
         JOIN divisions d  ON g.division_id = d.id
         {$where_clause}
         GROUP BY m.team, d.id
-        ORDER BY total_cards DESC, m.team ASC
     ";
 
     $stmt = $pdo->prepare($sql);
@@ -303,15 +313,24 @@ function handle_teams(PDO $pdo): void {
 
     $result = [];
     foreach ($stmt->fetchAll() as $row) {
+        $gp    = max((int) $row['games_played'], 1);
+        $score = round((float) $row['discipline_weight'] / $gp, 2);
+
         $result[] = [
-            'team'           => $row['team'],
-            'division'       => $row['division'],
-            'yellow_count'   => (int) $row['yellow_count'],
-            'red_count'      => (int) $row['red_count'],
-            'total_cards'    => (int) $row['total_cards'],
-            'unique_players' => (int) $row['unique_players'],
+            'team'             => $row['team'],
+            'division'         => $row['division'],
+            'yellows'          => (int) $row['yellows'],
+            'reds'             => (int) $row['reds'],
+            'bench_yellows'    => (int) $row['bench_yellows'],
+            'bench_reds'       => (int) $row['bench_reds'],
+            'total_cards'      => (int) $row['total_cards'],
+            'unique_players'   => (int) $row['unique_players'],
+            'games_played'     => (int) $row['games_played'],
+            'discipline_score' => $score,
         ];
     }
+
+    usort($result, fn($a, $b) => $b['discipline_score'] <=> $a['discipline_score']);
 
     echo json_encode($result);
 }

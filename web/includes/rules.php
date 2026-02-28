@@ -203,6 +203,122 @@ function get_player_printable_suspensions(PDO $pdo, string $player_name): array 
     return $stmt->fetchAll();
 }
 
+// ── Canadian Soccer Disciplinary Code: Misconduct Severity Weights ──────────
+//
+// Yellow cards are Category E offences under the CSDC. Their sub-weights
+// reflect escalating risk to player/official safety and league culture:
+//
+//   Dissent by word or action              → 2.5  (challenges authority)
+//   Unsporting Behavior                    → 2.0  (broad behaviour violation)
+//   Persistent infringement                → 1.5  (tactical/pattern fouling)
+//   Procedural offences (delay, distance)  → 1.0  (game-management only)
+//
+// Direct red cards follow CSDC categories A–D:
+//
+//   Category A  Violent Conduct            → 9.0  (endangers others)
+//   Spitting (at person)                   → 7.5  (morally reprehensible)
+//   Category D  Abuse of an Official       → 7.0  (undermines authority)
+//   Category B  Serious Foul Play          → 6.0  (dangerous challenge)
+//   Category C  DOGSO                      → 4.5  (tactical/professional foul)
+//   Two-Yellow Ejection                    → 3.0  (accumulated cautions)
+//
+// Bench penalties carry a 1.5× multiplier: the bench being carded signals
+// a team-culture failure, not an individual lapse.
+
+/**
+ * Weight for a yellow card (Category E) reason.
+ */
+function yellow_weight(string $reason): float {
+    if (str_contains($reason, 'Dissent'))                  return 2.5;
+    if (str_contains($reason, 'Unsporting'))               return 2.0;
+    if (str_contains($reason, 'Persistent infringement'))  return 1.5;
+    return 1.0; // Delaying restart, required distance, entry without permission
+}
+
+/**
+ * Weight for a red card reason aligned to CSDC categories A–D.
+ */
+function red_weight(string $reason): float {
+    if (str_contains($reason, 'Category A') || str_contains($reason, 'Violent Conduct')) return 9.0;
+    if (str_contains($reason, 'Spitting'))   return 7.5;
+    if (str_contains($reason, 'Category D') || str_contains($reason, 'Foul and Abusive')
+      || str_contains($reason, 'Abuse of an Official'))   return 7.0;
+    if (str_contains($reason, 'Serious Foul Play'))       return 6.0;
+    if (str_contains($reason, 'Denying Obvious') || str_contains($reason, 'DOGSO')) return 4.5;
+    if (str_contains($reason, 'Second Caution'))          return 3.0;
+    return 4.0;
+}
+
+/**
+ * Combined card weight. Pass reason and card_type ('Yellow'|'Red').
+ */
+function card_weight(string $reason, string $card_type): float {
+    return $card_type === 'Yellow' ? yellow_weight($reason) : red_weight($reason);
+}
+
+/**
+ * Discipline score colour threshold (per game, using CSDC-weighted scores).
+ *
+ * Calibrated against league data: league average ≈ 0.9–1.0 pts/game for
+ * teams with cards (behavioral yellows only). Violent conduct reds push
+ * teams to 3–4+/game.
+ *
+ * Green < 1.0  | Amber 1.0–2.5  | Red > 2.5
+ */
+function discipline_color(float $score): string {
+    if ($score > 2.5) return 'red';
+    if ($score >= 1.0) return 'amber';
+    return 'green';
+}
+
+function discipline_label(float $score): string {
+    return match(discipline_color($score)) {
+        'red'   => 'High Risk',
+        'amber' => 'Elevated',
+        default => 'Clean',
+    };
+}
+
+/**
+ * Generates a SQL expression (scalar float) for the weighted score of one
+ * misconduct row. Applies the 1.5× bench multiplier inline.
+ *
+ * @param string $reason_col  SQL expression for the reason column
+ * @param string $card_col    SQL expression for the card_type column
+ * @param string $player_col  SQL expression for the player_name column
+ */
+function weight_sql(
+    string $reason_col = 'm.reason',
+    string $card_col   = 'm.card_type',
+    string $player_col = 'm.player_name'
+): string {
+    return "
+        (CASE
+            WHEN $card_col = 'Yellow' THEN
+                CASE
+                    WHEN $reason_col LIKE '%Dissent%'                          THEN 2.5
+                    WHEN $reason_col LIKE '%Unsporting%'                       THEN 2.0
+                    WHEN $reason_col LIKE '%Persistent infringement%'          THEN 1.5
+                    ELSE 1.0
+                END
+            WHEN $card_col = 'Red' THEN
+                CASE
+                    WHEN $reason_col LIKE '%Category A%'
+                      OR $reason_col LIKE '%Violent Conduct%'                  THEN 9.0
+                    WHEN $reason_col LIKE '%Spitting%'                         THEN 7.5
+                    WHEN $reason_col LIKE '%Category D%'
+                      OR $reason_col LIKE '%Foul and Abusive%'
+                      OR $reason_col LIKE '%Abuse of an Official%'             THEN 7.0
+                    WHEN $reason_col LIKE '%Serious Foul Play%'                THEN 6.0
+                    WHEN $reason_col LIKE '%Denying Obvious%'                  THEN 4.5
+                    WHEN $reason_col LIKE '%Second Caution%'                   THEN 3.0
+                    ELSE 4.0
+                END
+            ELSE 0.0
+        END * CASE WHEN $player_col = 'Bench Penalty' THEN 1.5 ELSE 1.0 END)
+    ";
+}
+
 /**
  * Build a compliance report for a player:
  * - How many suspensions should have been triggered

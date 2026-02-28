@@ -71,6 +71,16 @@ def init_db() -> None:
             team TEXT,
             FOREIGN KEY (game_id) REFERENCES games(id)
         );
+
+        -- Manual name corrections keyed by RAMP external game_id.
+        -- Applied during scraping so corrections survive --full re-scrapes.
+        CREATE TABLE IF NOT EXISTS name_corrections (
+            id INTEGER PRIMARY KEY,
+            game_id INTEGER NOT NULL,
+            wrong_name TEXT NOT NULL,
+            correct_name TEXT NOT NULL,
+            UNIQUE(game_id, wrong_name)
+        );
     """)
 
     # Seed division records
@@ -79,6 +89,28 @@ def init_db() -> None:
             INSERT OR IGNORE INTO divisions (division_id, name, type, level)
             VALUES (?, ?, ?, ?)
         """, (div_id, info["name"], info["type"], info["level"]))
+
+    # Seed known name corrections (game_id = RAMP external GID).
+    # These are applied at insert time so --full re-scrapes also pick them up.
+    KNOWN_CORRECTIONS = [
+        # game_id (RAMP external GID), wrong_name, correct_name
+        (1707872, "khaed issa",           "Khaled Issa"),
+        (1707883, "Abdul Rahman  Nasser", "Abdulrahman Nasser"),
+        (1666700, "Carlos Gonzales",      "Carlos Gonzalez"),
+        (1666930, "mahmoud issa",         "Mahmoud Issa"),
+        (1667045, "mahmoud issa",         "Mahmoud Issa"),
+        (1666882, "shan dhillon",         "Shan Dhillon"),
+        (1667057, "riley meloche",        "Riley Meloche"),
+        (1666995, "SHAM WELDEMICHEL",     "Sham Weldemichel"),
+        (1667101, "sham weldemichel",     "Sham Weldemichel"),
+        (1666848, "Adebo Falase",         "Adeoba Falase"),
+        (1707887, "Sulliman Akbari",      "Suleman Akbari"),
+    ]
+    for gid, wrong, correct in KNOWN_CORRECTIONS:
+        cur.execute("""
+            INSERT OR IGNORE INTO name_corrections (game_id, wrong_name, correct_name)
+            VALUES (?, ?, ?)
+        """, (gid, wrong, correct))
 
     conn.commit()
     conn.close()
@@ -134,6 +166,29 @@ def mark_game_scraped(conn: sqlite3.Connection, game_id: int) -> None:
     )
 
 
+def get_name_corrections(conn: sqlite3.Connection, ramp_game_id: int) -> dict:
+    """Return {wrong_name: correct_name} for the given RAMP external game_id."""
+    rows = conn.execute(
+        "SELECT wrong_name, correct_name FROM name_corrections WHERE game_id = ?",
+        (ramp_game_id,),
+    ).fetchall()
+    return {r["wrong_name"]: r["correct_name"] for r in rows}
+
+
+def insert_name_correction(
+    conn: sqlite3.Connection,
+    ramp_game_id: int,
+    wrong_name: str,
+    correct_name: str,
+) -> None:
+    """Persist a name correction and commit immediately."""
+    conn.execute("""
+        INSERT OR IGNORE INTO name_corrections (game_id, wrong_name, correct_name)
+        VALUES (?, ?, ?)
+    """, (ramp_game_id, wrong_name, correct_name))
+    conn.commit()
+
+
 def insert_misconduct(
     conn: sqlite3.Connection,
     game_pk: int,
@@ -143,7 +198,10 @@ def insert_misconduct(
     minute: str,
     reason: str,
     card_type: str,
+    corrections: dict | None = None,
 ) -> None:
+    if corrections:
+        player_name = corrections.get(player_name, player_name)
     conn.execute("""
         INSERT INTO misconducts (game_id, player_name, player_number, team, minute, reason, card_type)
         VALUES (?, ?, ?, ?, ?, ?, ?)

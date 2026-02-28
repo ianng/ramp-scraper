@@ -59,6 +59,62 @@ foreach ($served as $s) {
 // Overall status based on combined yellows
 $overall_status = yellow_status(count($yellows_combined));
 
+// CSDC danger score from all cards
+$player_danger    = 0.0;
+$player_breakdown = [
+    'proc_y' => ['count' => 0, 'weight' => 0.0, 'label' => 'Procedural Yellow',  'color' => '#f59e0b'],
+    'beh_y'  => ['count' => 0, 'weight' => 0.0, 'label' => 'Behavioural Yellow', 'color' => '#d97706'],
+    'soft_r' => ['count' => 0, 'weight' => 0.0, 'label' => 'Two-Yellow Ejection','color' => '#f97316'],
+    'hard_r' => ['count' => 0, 'weight' => 0.0, 'label' => 'Direct Red Card',     'color' => '#dc2626'],
+];
+$player_timeline = [];
+foreach ($all_cards as $c) {
+    $w = card_weight($c['reason'] ?? '', $c['card_type']);
+    $player_danger += $w;
+    if ($c['card_type'] === 'Yellow') {
+        $key = yellow_weight($c['reason'] ?? '') <= 1.0 ? 'proc_y' : 'beh_y';
+    } else {
+        $key = red_weight($c['reason'] ?? '') <= 3.0 ? 'soft_r' : 'hard_r';
+    }
+    $player_breakdown[$key]['count']++;
+    $player_breakdown[$key]['weight'] += $w;
+    // Timeline
+    $month_key = date('M Y', strtotime($c['game_date'] ?: 'now'));
+    if (!isset($player_timeline[$month_key])) {
+        $player_timeline[$month_key] = ['y' => 0, 'r' => 0, 'sort' => $c['game_date'] ?: ''];
+    }
+    if ($c['card_type'] === 'Yellow') $player_timeline[$month_key]['y']++;
+    else $player_timeline[$month_key]['r']++;
+}
+uasort($player_timeline, fn($a, $b) => strcmp($a['sort'], $b['sort']));
+$pdanger_color  = $player_danger > 7.0 ? 'red'   : ($player_danger >= 3.0 ? 'amber' : 'green');
+$pdanger_label  = $player_danger > 7.0 ? 'High Risk' : ($player_danger >= 3.0 ? 'Moderate Risk' : 'Low Risk');
+$pdanger_text   = match($pdanger_color) { 'red' => 'text-red-600',   'amber' => 'text-amber-600',  default => 'text-green-600'  };
+$pdanger_border = match($pdanger_color) { 'red' => 'border-red-500', 'amber' => 'border-amber-400', default => 'border-green-400' };
+
+// League average danger score + player ranking
+$w_sql_p = weight_sql();
+$league_avg_danger = (float)$pdo->query("
+    SELECT AVG(dw) FROM (
+        SELECT m.player_name, SUM($w_sql_p) AS dw
+        FROM misconducts m
+        WHERE m.player_name != 'Bench Penalty'
+        GROUP BY m.player_name
+    )
+")->fetchColumn();
+$stmt_rank = $pdo->prepare("
+    SELECT COUNT(*) FROM (
+        SELECT m.player_name, SUM($w_sql_p) AS dw
+        FROM misconducts m
+        WHERE m.player_name != 'Bench Penalty'
+        GROUP BY m.player_name
+        HAVING dw > ?
+    )
+");
+$stmt_rank->execute([$player_danger]);
+$danger_rank         = (int)$stmt_rank->fetchColumn() + 1;
+$total_ranked        = (int)$pdo->query("SELECT COUNT(DISTINCT player_name) FROM misconducts WHERE player_name != 'Bench Penalty'")->fetchColumn();
+
 // Per-division data (for per_division mode)
 $division_yellows = [];
 if ($mode === 'per_division') {
@@ -129,6 +185,82 @@ $comp_class = $comp['fully_compliant'] ? 'bg-green-50 border-green-400 text-gree
         </span>
     </div>
 </div>
+
+<!-- Player Stats Bar -->
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+    <div class="bg-white rounded-lg shadow p-3 border-l-4 border-amber-400">
+        <div class="text-xs text-gray-500">Yellow Cards</div>
+        <div class="text-xl font-bold text-amber-600"><?= count($yellows_combined) ?></div>
+        <div class="text-xs text-gray-400 mt-0.5"><?= $overall_status['label'] ?></div>
+    </div>
+    <div class="bg-white rounded-lg shadow p-3 border-l-4 border-red-500">
+        <div class="text-xs text-gray-500">Red Cards</div>
+        <div class="text-xl font-bold text-red-600"><?= count($reds) ?></div>
+    </div>
+    <div class="bg-white rounded-lg shadow p-3 border-l-4 <?= $pdanger_border ?>">
+        <div class="text-xs text-gray-500 flex items-center justify-between">
+            <span>Danger Score</span>
+            <a href="scoring.php" class="text-gray-300 hover:text-primary" title="About scoring">ⓘ</a>
+        </div>
+        <div class="text-xl font-bold <?= $pdanger_text ?>"><?= number_format($player_danger, 1) ?></div>
+        <div class="text-xs <?= $pdanger_text ?> font-medium"><?= $pdanger_label ?></div>
+        <?php if ($league_avg_danger > 0): ?>
+        <?php $vs_avg = $player_danger - $league_avg_danger; ?>
+        <div class="text-xs text-gray-400 mt-1">
+            Avg: <?= number_format($league_avg_danger, 1) ?>
+            <span class="<?= $vs_avg > 0 ? 'text-red-500' : 'text-green-600' ?> font-semibold">
+                (<?= $vs_avg > 0 ? '+' : '' ?><?= number_format($vs_avg, 1) ?>)
+            </span>
+        </div>
+        <div class="text-xs text-gray-400">
+            #<?= $danger_rank ?> of <?= $total_ranked ?> players
+        </div>
+        <?php endif; ?>
+    </div>
+    <div class="bg-white rounded-lg shadow p-3 border-l-4 border-primary">
+        <div class="text-xs text-gray-500">Total Cards</div>
+        <div class="text-xl font-bold text-primary"><?= count($all_cards) ?></div>
+    </div>
+</div>
+
+<?php if (!empty($all_cards)): ?>
+<?php
+$pb_labels  = [];
+$pb_data    = [];
+$pb_colors  = [];
+foreach ($player_breakdown as $tier) {
+    if ($tier['count'] === 0) continue;
+    $pb_labels[]  = $tier['label'];
+    $pb_data[]    = round($tier['weight'], 2);
+    $pb_colors[]  = $tier['color'];
+}
+$ptl_labels  = json_encode(array_keys($player_timeline));
+$ptl_yellows = json_encode(array_values(array_column($player_timeline, 'y')));
+$ptl_reds    = json_encode(array_values(array_column($player_timeline, 'r')));
+?>
+<!-- Player Charts -->
+<div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">
+
+    <!-- CSDC Weight Breakdown -->
+    <div class="md:col-span-2 bg-white rounded-lg shadow p-4">
+        <h3 class="text-sm font-semibold text-gray-600 mb-3">Severity Breakdown
+            <span class="font-normal text-gray-400 text-xs">(CSDC weight)</span>
+        </h3>
+        <div style="height:100px">
+            <canvas id="chart-player-severity"></canvas>
+        </div>
+    </div>
+
+    <!-- Card Timeline -->
+    <div class="md:col-span-3 bg-white rounded-lg shadow p-4">
+        <h3 class="text-sm font-semibold text-gray-600 mb-3">Card History Timeline</h3>
+        <div style="height:100px">
+            <canvas id="chart-player-timeline"></canvas>
+        </div>
+    </div>
+
+</div>
+<?php endif; ?>
 
 <!-- View Toggle -->
 <div class="mb-6 flex gap-1">
@@ -361,9 +493,68 @@ $comp_class = $comp['fully_compliant'] ? 'bg-green-50 border-green-400 text-gree
 
 
 <div class="mt-6 mb-4">
-    <a href="index.php" class="text-primary hover:underline">&larr; Back to Dashboard</a>
+    <a href="players.php" class="text-primary hover:underline">&larr; Back to Players</a>
 </div>
 
 </main>
 </body>
+<?php if (!empty($all_cards)): ?>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+(function() {
+    const sevCtx = document.getElementById('chart-player-severity');
+    if (sevCtx) {
+        new Chart(sevCtx, {
+            type: 'bar',
+            data: {
+                labels: <?= json_encode($pb_labels) ?>,
+                datasets: [{
+                    data:            <?= json_encode($pb_data) ?>,
+                    backgroundColor: <?= json_encode($pb_colors) ?>,
+                    borderRadius: 3,
+                }]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: { callbacks: { label: ctx => ` ${ctx.parsed.x.toFixed(1)} pts` } }
+                },
+                scales: {
+                    x: { beginAtZero: true, ticks: { font: { size: 9 } } },
+                    y: { ticks: { font: { size: 9 } } }
+                }
+            }
+        });
+    }
+
+    const tlCtx = document.getElementById('chart-player-timeline');
+    if (tlCtx) {
+        new Chart(tlCtx, {
+            type: 'bar',
+            data: {
+                labels: <?= $ptl_labels ?>,
+                datasets: [
+                    { label: 'Yellows', data: <?= $ptl_yellows ?>, backgroundColor: '#f59e0b', stack: 'c' },
+                    { label: 'Reds',    data: <?= $ptl_reds ?>,    backgroundColor: '#dc2626', stack: 'c' }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top', labels: { boxWidth: 10, padding: 8, font: { size: 10 } } }
+                },
+                scales: {
+                    x: { stacked: true, ticks: { font: { size: 9 } } },
+                    y: { stacked: true, beginAtZero: true, ticks: { stepSize: 1, font: { size: 9 } } }
+                }
+            }
+        });
+    }
+})();
+</script>
+<?php endif; ?>
 </html>

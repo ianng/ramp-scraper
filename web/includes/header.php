@@ -113,20 +113,24 @@ function nav_active(string $page, string $view = ''): string {
         <!-- Desktop nav links -->
         <div class="hidden md:flex gap-6 text-sm">
             <a href="index.php" class="hover:text-accent transition-colors <?= nav_active('index.php') ?>">Dashboard</a>
+            <a href="players.php" class="hover:text-accent transition-colors <?= nav_active('players.php') ?>">Players</a>
             <a href="team.php" class="hover:text-accent transition-colors <?= nav_active('team.php') ?>">Teams</a>
             <a href="division.php" class="hover:text-accent transition-colors <?= nav_active('division.php') ?>">Divisions</a>
             <a href="index.php?view=teams" class="hover:text-accent transition-colors <?= nav_active('index.php', 'teams') ?>">Discipline Rankings</a>
             <a href="index.php?view=discrepancies" class="hover:text-accent transition-colors <?= nav_active('index.php', 'discrepancies') ?>">Discrepancies</a>
+            <a href="scoring.php" class="hover:text-accent transition-colors <?= nav_active('scoring.php') ?>">Scoring Guide</a>
         </div>
     </div>
     <!-- Mobile nav drawer -->
     <div id="nav-drawer" class="hidden border-t border-white/20 md:hidden">
         <div class="max-w-7xl mx-auto px-4 py-2 flex flex-col text-sm">
             <a href="index.php" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('index.php') ?>">Dashboard</a>
+            <a href="players.php" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('players.php') ?>">Players</a>
             <a href="team.php" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('team.php') ?>">Teams</a>
             <a href="division.php" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('division.php') ?>">Divisions</a>
             <a href="index.php?view=teams" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('index.php', 'teams') ?>">Discipline Rankings</a>
-            <a href="index.php?view=discrepancies" class="py-2.5 hover:text-accent transition-colors <?= nav_active('index.php', 'discrepancies') ?>">Discrepancies</a>
+            <a href="index.php?view=discrepancies" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('index.php', 'discrepancies') ?>">Discrepancies</a>
+            <a href="scoring.php" class="py-2.5 hover:text-accent transition-colors <?= nav_active('scoring.php') ?>">Scoring Guide</a>
         </div>
     </div>
 </nav>

@@ -46,22 +46,34 @@ if ($f_div > 0) {
 }
 $where_sql = $where_parts ? 'AND ' . implode(' AND ', $where_parts) : '';
 
+$w_sql = weight_sql('m.reason', 'm.card_type', 'm.player_name');
 $stmt = $pdo->prepare("
     SELECT m.team,
            GROUP_CONCAT(DISTINCT d.name) AS divisions,
            GROUP_CONCAT(DISTINCT d.type) AS types,
-           SUM(CASE WHEN m.card_type='Yellow' THEN 1 ELSE 0 END) AS yellows,
-           SUM(CASE WHEN m.card_type='Red'    THEN 1 ELSE 0 END) AS reds,
-           COUNT(*) AS total_cards
+           SUM(CASE WHEN m.card_type='Yellow' AND m.player_name != 'Bench Penalty' THEN 1 ELSE 0 END) AS yellows,
+           SUM(CASE WHEN m.card_type='Red'    AND m.player_name != 'Bench Penalty' THEN 1 ELSE 0 END) AS reds,
+           SUM(CASE WHEN m.card_type='Yellow' AND m.player_name  = 'Bench Penalty' THEN 1 ELSE 0 END) AS bench_yellows,
+           SUM(CASE WHEN m.card_type='Red'    AND m.player_name  = 'Bench Penalty' THEN 1 ELSE 0 END) AS bench_reds,
+           COUNT(*) AS total_cards,
+           SUM($w_sql) AS discipline_weight,
+           (SELECT COUNT(*) FROM games g2 WHERE g2.home_team = m.team OR g2.away_team = m.team) AS games_played
     FROM misconducts m
     JOIN games g ON m.game_id = g.id
     JOIN divisions d ON g.division_id = d.id
     WHERE 1=1 $where_sql
     GROUP BY m.team
-    ORDER BY total_cards DESC
 ");
 $stmt->execute($where_params);
-$teams = $stmt->fetchAll();
+$teams_raw = $stmt->fetchAll();
+
+foreach ($teams_raw as &$t) {
+    $gp = max((int)$t['games_played'], 1);
+    $t['discipline_score'] = round((float)$t['discipline_weight'] / $gp, 2);
+}
+unset($t);
+usort($teams_raw, fn($a, $b) => $b['discipline_score'] <=> $a['discipline_score']);
+$teams = $teams_raw;
 
 $type_badge = [
     'mens'   => 'bg-blue-100 text-blue-700',
@@ -116,14 +128,25 @@ $type_badge = [
                 <th class="px-4 py-3 text-left">Type</th>
                 <th class="px-4 py-3 text-center">Yellows</th>
                 <th class="px-4 py-3 text-center">Reds</th>
+                <th class="px-4 py-3 text-center">Bench</th>
                 <th class="px-4 py-3 text-center">Total Cards</th>
+                <th class="px-4 py-3 text-center">Score</th>
             </tr>
         </thead>
         <tbody class="divide-y divide-gray-100">
             <?php foreach ($teams as $i => $t): ?>
             <?php
-                $div_list  = array_filter(array_map('trim', explode(',', $t['divisions'] ?? '')));
-                $type_list = array_unique(array_filter(array_map('trim', explode(',', $t['types'] ?? ''))));
+                $div_list    = array_filter(array_map('trim', explode(',', $t['divisions'] ?? '')));
+                $type_list   = array_unique(array_filter(array_map('trim', explode(',', $t['types'] ?? ''))));
+                $bench_total = (int)$t['bench_yellows'] + (int)$t['bench_reds'];
+                $bench_str   = $bench_total > 0
+                    ? (int)$t['bench_yellows'] . 'Y / ' . (int)$t['bench_reds'] . 'R'
+                    : '—';
+                $bench_class = $bench_total > 0 ? 'text-orange-600 font-semibold' : 'text-gray-400';
+                $score       = $t['discipline_score'];
+                $score_class = $score > 2.5 ? 'text-red-600 font-bold'
+                             : ($score >= 1.0 ? 'text-amber-600 font-semibold'
+                             : 'text-green-600 font-semibold');
             ?>
             <tr class="hover:bg-gray-50">
                 <td class="px-4 py-2 text-gray-400"><?= $i + 1 ?></td>
@@ -142,11 +165,13 @@ $type_badge = [
                 </td>
                 <td class="px-4 py-2 text-center text-amber-600 font-semibold"><?= $t['yellows'] ?></td>
                 <td class="px-4 py-2 text-center text-red-600 font-semibold"><?= $t['reds'] ?></td>
+                <td class="px-4 py-2 text-center <?= $bench_class ?>"><?= $bench_str ?></td>
                 <td class="px-4 py-2 text-center font-bold"><?= $t['total_cards'] ?></td>
+                <td class="px-4 py-2 text-center <?= $score_class ?>"><?= number_format($score, 2) ?></td>
             </tr>
             <?php endforeach; ?>
             <?php if (empty($teams)): ?>
-            <tr><td colspan="7" class="px-4 py-8 text-center text-gray-400">No teams match the selected filters.</td></tr>
+            <tr><td colspan="9" class="px-4 py-8 text-center text-gray-400">No teams match the selected filters.</td></tr>
             <?php endif; ?>
         </tbody>
     </table>
@@ -277,10 +302,10 @@ usort($discrepancies, fn($a, $b) => $b['unserved'] <=> $a['unserved']);
 
 <?php else: ?>
 <!-- ══════════════════════════════════════════════════════════════════════════
-     PLAYER DASHBOARD (DEFAULT VIEW)
+     DASHBOARD (DEFAULT VIEW)
      ══════════════════════════════════════════════════════════════════════════ -->
 <?php
-// Stats — computed only in the players view
+// Stats for the dashboard summary bar
 $total_yellows  = (int)$pdo->query("SELECT COUNT(*) FROM misconducts WHERE card_type='Yellow'")->fetchColumn();
 $total_reds     = (int)$pdo->query("SELECT COUNT(*) FROM misconducts WHERE card_type='Red'")->fetchColumn();
 $total_games    = (int)$pdo->query("SELECT COUNT(*) FROM games WHERE scraped_at IS NOT NULL")->fetchColumn();
@@ -298,6 +323,7 @@ $player_yellow_counts = $pdo->query("
                      ) THEN 1 ELSE 0 END) AS yellows,
            SUM(CASE WHEN m.card_type = 'Red' THEN 1 ELSE 0 END) AS reds
     FROM misconducts m
+    WHERE m.player_name != 'Bench Penalty'
     GROUP BY m.player_name
 ")->fetchAll();
 
@@ -335,85 +361,13 @@ foreach ($player_yellow_counts as $row) {
     </div>
 </div>
 
-<!-- ── Filters Bar ────────────────────────────────────────────────────────── -->
-<div class="bg-white rounded-lg shadow p-4 mb-6">
-    <form id="filter-form" class="flex flex-wrap items-end gap-3">
-        <div>
-            <label class="block text-xs font-medium text-gray-500 mb-1">Division Type</label>
-            <select id="f-type" class="border rounded px-3 py-1.5 text-sm">
-                <option value="">All</option>
-                <option value="mens">Mens</option>
-                <option value="womens">Womens</option>
-                <option value="coed">Coed</option>
-            </select>
-        </div>
-        <div>
-            <label class="block text-xs font-medium text-gray-500 mb-1">Division</label>
-            <select id="f-division" class="border rounded px-3 py-1.5 text-sm">
-                <option value="">All Divisions</option>
-                <?php foreach ($divisions as $div): ?>
-                <option value="<?= (int)$div['division_id'] ?>" data-type="<?= htmlspecialchars($div['type']) ?>">
-                    <?= htmlspecialchars($div['name']) ?>
-                </option>
-                <?php endforeach; ?>
-            </select>
-        </div>
-        <div class="relative" id="team-combo-wrapper">
-            <label class="block text-xs font-medium text-gray-500 mb-1">Team</label>
-            <input type="text" id="f-team-search" placeholder="All teams…" autocomplete="off"
-                   class="border rounded px-3 py-1.5 text-sm w-48">
-            <input type="hidden" id="f-team" value="">
-            <div id="team-dropdown" class="hidden absolute z-10 left-0 bg-white border rounded shadow-lg mt-1 w-48 max-h-48 overflow-y-auto text-sm"></div>
-        </div>
-        <div>
-            <label class="block text-xs font-medium text-gray-500 mb-1">View Mode</label>
-            <select id="f-mode" class="border rounded px-3 py-1.5 text-sm">
-                <option value="combined">Combined</option>
-                <option value="per_division">Per-Division</option>
-            </select>
-        </div>
-        <div>
-            <label class="block text-xs font-medium text-gray-500 mb-1">Yellows Min</label>
-            <input type="number" id="f-ymin" min="0" placeholder="0" class="border rounded px-3 py-1.5 text-sm w-20">
-        </div>
-        <div>
-            <label class="block text-xs font-medium text-gray-500 mb-1">Yellows Max</label>
-            <input type="number" id="f-ymax" min="0" placeholder="∞" class="border rounded px-3 py-1.5 text-sm w-20">
-        </div>
-        <button type="submit" class="bg-primary text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-accent transition-colors">
-            Filter
-        </button>
-    </form>
-</div>
 
-<!-- ── Export + Table ──────────────────────────────────────────────────────── -->
-<div class="flex items-center justify-between mb-3">
-    <h2 class="text-xl font-bold">Player Card Counts</h2>
-    <button id="btn-export" class="bg-gray-100 border border-gray-300 text-gray-700 px-3 py-1.5 rounded text-sm hover:bg-gray-200 transition-colors">
-        Export CSV
-    </button>
-</div>
-
-<div class="bg-white rounded-lg shadow overflow-x-auto mb-6">
-    <table id="player-table" class="w-full text-sm">
-        <thead class="bg-primary text-white">
-            <tr>
-                <th class="px-4 py-3 text-left">Player</th>
-                <th class="px-4 py-3 text-left">Team(s)</th>
-                <th class="px-4 py-3 text-left">Division(s)</th>
-                <th class="px-4 py-3 text-center">Yellows</th>
-                <th class="px-4 py-3 text-center">Reds</th>
-                <th class="px-4 py-3 text-left">Suspension Status</th>
-                <th class="px-4 py-3 text-center">Next Threshold</th>
-                <th class="px-4 py-3 text-left">Served</th>
-            </tr>
-        </thead>
-        <tbody id="player-tbody" class="divide-y divide-gray-100">
+<!-- ── Most Dangerous Players ──────────────────────────────────────────────── -->
 <?php
-$players = $pdo->query("
+$w_sql_idx = weight_sql('m.reason', 'm.card_type', 'm.player_name');
+$danger_players = $pdo->query("
     SELECT m.player_name,
            GROUP_CONCAT(DISTINCT m.team) AS teams,
-           GROUP_CONCAT(DISTINCT d.name) AS divisions,
            SUM(CASE WHEN m.card_type='Yellow'
                      AND NOT EXISTS (
                          SELECT 1 FROM misconducts m2
@@ -421,89 +375,61 @@ $players = $pdo->query("
                            AND m2.player_name = m.player_name
                            AND m2.card_type = 'Red'
                      ) THEN 1 ELSE 0 END) AS yellows,
-           SUM(CASE WHEN m.card_type='Red' THEN 1 ELSE 0 END) AS reds
+           SUM(CASE WHEN m.card_type='Red' THEN 1 ELSE 0 END) AS reds,
+           SUM($w_sql_idx) AS danger_weight
     FROM misconducts m
-    JOIN games g ON m.game_id = g.id
-    JOIN divisions d ON g.division_id = d.id
+    WHERE m.player_name != 'Bench Penalty'
     GROUP BY m.player_name
-    ORDER BY yellows DESC, reds DESC, m.player_name ASC
+    ORDER BY danger_weight DESC
+    LIMIT 10
 ")->fetchAll();
-
-// Pre-compute compliance for players at or past a suspension threshold.
-// Stored here so it can be reused by the table rows AND the alerts panel below.
-$susp_map = [];
-foreach ($players as $_p) {
-    if ((int)$_p['yellows'] < 3 && (int)$_p['reds'] === 0) continue;
-    $susp_map[$_p['player_name']] = get_compliance_report($pdo, $_p['player_name'], 'combined');
-}
-
-foreach ($players as $p):
-    $yellows = (int)$p['yellows'];
-    $reds    = (int)$p['reds'];
-    $status  = yellow_status($yellows);
-    $next    = yellows_until_next($yellows);
+$max_danger = !empty($danger_players) ? (float)$danger_players[0]['danger_weight'] : 1.0;
 ?>
-            <tr class="<?= $status['class'] ?>">
-                <td class="px-4 py-2 font-medium">
-                    <a href="player.php?name=<?= urlencode($p['player_name']) ?>" class="text-primary hover:underline">
-                        <?= htmlspecialchars($p['player_name']) ?>
-                    </a>
-                </td>
-                <td class="px-4 py-2" data-label="Team"><?= htmlspecialchars($p['teams']) ?></td>
-                <td class="px-4 py-2 text-xs" data-label="Division"><?= htmlspecialchars($p['divisions']) ?></td>
-                <td class="px-4 py-2 text-center font-semibold text-amber-600" data-label="Yellow"><?= $yellows ?></td>
-                <td class="px-4 py-2 text-center font-semibold text-red-600" data-label="Red"><?= $reds ?></td>
-                <td class="px-4 py-2" data-label="Status"><?= $status['label'] ?></td>
-                <td class="px-4 py-2 text-center" data-label="Next"><?= $next !== null ? $next . ' away' : '—' ?></td>
-                <?php $rpt = $susp_map[$p['player_name']] ?? null; ?>
-                <td class="px-4 py-2" data-label="Served">
-                    <?php if (!$rpt || $rpt['expected_count'] === 0): ?>
-                        <span class="text-gray-400">—</span>
-                    <?php elseif ($rpt['fully_compliant']): ?>
-                        <span class="text-green-700 font-medium">&#10003; Served</span>
-                    <?php else: ?>
-                        <span class="text-red-600 font-semibold"><?= $rpt['unserved_count'] ?> unserved</span>
-                    <?php endif; ?>
-                </td>
-            </tr>
-<?php endforeach; ?>
-        </tbody>
-    </table>
-</div>
-
-<!-- ── Compliance Alert Panel ─────────────────────────────────────────────── -->
-<?php
-$alerts = [];
-foreach ($players as $p) {
-    $report = $susp_map[$p['player_name']] ?? null;
-    if (!$report || $report['unserved_count'] <= 0) continue;
-    $alerts[] = [
-        'player'   => $p['player_name'],
-        'unserved' => $report['unserved_count'],
-        'expected' => $report['expected_count'],
-        'served'   => $report['served_count'],
-    ];
-}
-usort($alerts, fn($a, $b) => $b['unserved'] <=> $a['unserved']);
-?>
-<?php if (!empty($alerts)): ?>
+<?php if (!empty($danger_players)): ?>
 <div class="mb-6">
-    <h2 class="text-xl font-bold mb-3 text-red-700">Unserved Suspensions</h2>
-    <p class="text-sm text-gray-500 mb-3">Suspensions triggered by yellow card accumulation that have not yet been recorded as served. Note: the league enforces these via a monthly report — they may be pending rather than definitively missed.</p>
-    <div class="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-        <?php foreach ($alerts as $a): ?>
-        <div class="bg-red-50 border border-red-200 rounded-lg p-4">
-            <div class="font-semibold">
-                <a href="player.php?name=<?= urlencode($a['player']) ?>" class="text-red-800 hover:underline">
-                    <?= htmlspecialchars($a['player']) ?>
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-xl font-bold">Most Dangerous Players</h2>
+        <a href="scoring.php" class="text-xs text-gray-400 hover:text-primary hover:underline">
+            How is this calculated? &rarr;
+        </a>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+        <div class="space-y-2.5">
+        <?php foreach ($danger_players as $i => $dp):
+            $dw = (float)$dp['danger_weight'];
+            $pct = $max_danger > 0 ? round($dw / $max_danger * 100) : 0;
+            $dc = $dw > 7.0 ? 'bg-red-500' : ($dw >= 3.0 ? 'bg-amber-400' : 'bg-green-400');
+            $tc = $dw > 7.0 ? 'text-red-600' : ($dw >= 3.0 ? 'text-amber-600' : 'text-green-600');
+        ?>
+        <div class="flex items-center gap-3">
+            <div class="w-5 text-xs text-gray-400 text-right shrink-0"><?= $i + 1 ?></div>
+            <div class="w-32 sm:w-44 shrink-0">
+                <a href="player.php?name=<?= urlencode($dp['player_name']) ?>"
+                   class="text-sm font-medium text-primary hover:underline truncate block">
+                    <?= htmlspecialchars($dp['player_name']) ?>
                 </a>
+                <div class="text-xs text-gray-400 truncate"><?= htmlspecialchars($dp['teams']) ?></div>
             </div>
-            <div class="text-sm text-red-600 mt-1">
-                <?= $a['unserved'] ?> unserved suspension<?= $a['unserved'] > 1 ? 's' : '' ?>
-                <span class="text-xs text-red-400">(<?= $a['served'] ?>/<?= $a['expected'] ?> served)</span>
+            <div class="flex-1 min-w-0">
+                <div class="w-full bg-gray-100 rounded-full h-3">
+                    <div class="<?= $dc ?> h-3 rounded-full transition-all" style="width:<?= $pct ?>%"></div>
+                </div>
+            </div>
+            <div class="w-24 text-right shrink-0">
+                <span class="text-sm font-bold font-mono <?= $tc ?>"><?= number_format($dw, 1) ?></span>
+                <span class="text-xs text-gray-400 ml-1">pts</span>
+            </div>
+            <div class="hidden sm:flex gap-2 shrink-0">
+                <?php if ((int)$dp['yellows'] > 0): ?>
+                <span class="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-mono"><?= $dp['yellows'] ?>Y</span>
+                <?php endif; ?>
+                <?php if ((int)$dp['reds'] > 0): ?>
+                <span class="text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-mono"><?= $dp['reds'] ?>R</span>
+                <?php endif; ?>
             </div>
         </div>
         <?php endforeach; ?>
+        </div>
     </div>
 </div>
 <?php endif; ?>
@@ -518,7 +444,7 @@ $volatile_games = $pdo->query("
     JOIN divisions d ON g.division_id = d.id
     GROUP BY g.id
     ORDER BY cards DESC
-    LIMIT 5
+    LIMIT 10
 ")->fetchAll();
 ?>
 <?php if (!empty($volatile_games)): ?>
@@ -649,160 +575,6 @@ $recent_activity = $pdo->query("
 </div>
 <?php endif; ?>
 
-<!-- ── JavaScript: AJAX filtering + CSV export ────────────────────────────── -->
-<?php
-$all_teams = $pdo->query("SELECT DISTINCT team FROM misconducts ORDER BY team ASC")->fetchAll(PDO::FETCH_COLUMN);
-?>
-<script>
-document.addEventListener('DOMContentLoaded', () => {
-    const form       = document.getElementById('filter-form');
-    const tbody      = document.getElementById('player-tbody');
-    const typeEl     = document.getElementById('f-type');
-    const divEl      = document.getElementById('f-division');
-    const teamSearch = document.getElementById('f-team-search');
-    const teamHidden = document.getElementById('f-team');
-    const teamDrop   = document.getElementById('team-dropdown');
-    const allTeams   = <?= json_encode($all_teams) ?>;
-
-    // ── Team combobox ──────────────────────────────────────────────────────────
-    function renderTeamOptions(q) {
-        const lower    = q.toLowerCase();
-        const filtered = q ? allTeams.filter(t => t.toLowerCase().includes(lower)) : allTeams;
-        const clearOpt = '<div class="px-3 py-1.5 cursor-pointer hover:bg-gray-100 text-gray-400 italic" data-val="">All teams</div>';
-        teamDrop.innerHTML = clearOpt + (filtered.length
-            ? filtered.map(t => `<div class="px-3 py-1.5 cursor-pointer hover:bg-primary hover:text-white truncate" data-val="${esc(t)}">${esc(t)}</div>`).join('')
-            : '<div class="px-3 py-2 text-gray-400 text-xs">No match</div>');
-    }
-
-    teamSearch.addEventListener('focus', () => {
-        renderTeamOptions(teamSearch.value);
-        teamDrop.classList.remove('hidden');
-    });
-    teamSearch.addEventListener('input', () => {
-        teamHidden.value = '';
-        renderTeamOptions(teamSearch.value);
-        teamDrop.classList.remove('hidden');
-    });
-    teamDrop.addEventListener('mousedown', (e) => {
-        const opt = e.target.closest('[data-val]');
-        if (!opt) return;
-        e.preventDefault();
-        teamHidden.value = opt.dataset.val;
-        teamSearch.value = opt.dataset.val;
-        teamDrop.classList.add('hidden');
-    });
-    document.addEventListener('click', (e) => {
-        if (!document.getElementById('team-combo-wrapper').contains(e.target)) {
-            teamDrop.classList.add('hidden');
-        }
-    });
-
-    // Filter division dropdown when type changes
-    typeEl.addEventListener('change', () => {
-        const sel = typeEl.value;
-        for (const opt of divEl.options) {
-            if (!opt.value) { opt.hidden = false; continue; }
-            opt.hidden = sel && opt.dataset.type !== sel;
-        }
-        if (divEl.selectedOptions[0]?.hidden) divEl.value = '';
-    });
-
-    // AJAX filter
-    form.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const params = new URLSearchParams({ action: 'players' });
-        const type = typeEl.value;          if (type) params.set('div_type', type);
-        const div  = divEl.value;           if (div)  params.set('division_id', div);
-        const team = document.getElementById('f-team').value.trim();
-        if (team) params.set('team', team);
-        const mode = document.getElementById('f-mode').value;
-        params.set('mode', mode);
-        const ymin = document.getElementById('f-ymin').value;
-        const ymax = document.getElementById('f-ymax').value;
-        if (ymin) params.set('min_yellows', ymin);
-        if (ymax) params.set('max_yellows', ymax);
-
-        tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-gray-400">Loading…</td></tr>';
-
-        try {
-            const res  = await fetch('api.php?' + params.toString());
-            const data = await res.json();
-            renderRows(data.players ?? []);
-            updateStats(data.stats);
-        } catch (err) {
-            tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-red-500">Error loading data.</td></tr>';
-        }
-    });
-
-    function renderRows(players) {
-        if (!players.length) {
-            tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-gray-400">No players match filters.</td></tr>';
-            return;
-        }
-        tbody.innerHTML = players.map(p => {
-            return `<tr class="${esc(p.status_class)}">
-                <td class="px-4 py-2 font-medium">
-                    <a href="player.php?name=${encodeURIComponent(p.name)}" class="text-primary hover:underline">${esc(p.name)}</a>
-                </td>
-                <td class="px-4 py-2" data-label="Team">${esc(p.teams.join(', '))}</td>
-                <td class="px-4 py-2 text-xs" data-label="Division">${esc(p.divisions.join(', '))}</td>
-                <td class="px-4 py-2 text-center font-semibold text-amber-600" data-label="Yellow">${p.yellow_count}</td>
-                <td class="px-4 py-2 text-center font-semibold text-red-600" data-label="Red">${p.red_count}</td>
-                <td class="px-4 py-2" data-label="Status">${esc(p.status_label)}</td>
-                <td class="px-4 py-2 text-center" data-label="Next">${p.next_threshold !== null ? p.next_threshold + ' away' : '—'}</td>
-                <td class="px-4 py-2" data-label="Served"><span class="${esc(p.served_class)}">${esc(p.served_label)}</span></td>
-            </tr>`;
-        }).join('');
-    }
-
-    function updateStats(stats) {
-        if (!stats) return;
-        document.getElementById('stat-yellows').textContent     = stats.total_yellows;
-        document.getElementById('stat-reds').textContent        = stats.total_reds;
-        document.getElementById('stat-suspensions').textContent = stats.suspension_due;
-        document.getElementById('stat-games').textContent       = stats.total_games;
-        document.getElementById('stat-divs').textContent        = stats.total_divs;
-        document.getElementById('stat-teams').textContent       = stats.total_teams + ' teams';
-    }
-
-    function esc(s) {
-        const d = document.createElement('div');
-        d.textContent = s ?? '';
-        return d.innerHTML;
-    }
-
-    // CSV Export
-    document.getElementById('btn-export').addEventListener('click', () => {
-        const table = document.getElementById('player-table');
-        const rows  = table.querySelectorAll('tr');
-        const csv   = [];
-        rows.forEach(row => {
-            const cells = row.querySelectorAll('th, td');
-            const line  = [];
-            cells.forEach(c => {
-                let txt = c.textContent.trim().replace(/"/g, '""');
-                line.push('"' + txt + '"');
-            });
-            csv.push(line.join(','));
-        });
-        const blob = new Blob([csv.join('\n')], { type: 'text/csv' });
-        const url  = URL.createObjectURL(blob);
-        const a    = document.createElement('a');
-        a.href = url;
-        a.download = 'player_cards_' + new Date().toISOString().slice(0, 10) + '.csv';
-        a.click();
-        URL.revokeObjectURL(url);
-    });
-
-    // Pre-populate team filter from ?team= URL param
-    const urlTeam = new URLSearchParams(location.search).get('team');
-    if (urlTeam) {
-        teamSearch.value = urlTeam;
-        teamHidden.value = urlTeam;
-        form.dispatchEvent(new Event('submit'));
-    }
-});
-</script>
 
 <?php endif; ?>
 

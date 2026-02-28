@@ -4,6 +4,7 @@ Indoor Soccer League Misconduct Scraper
 Usage:
     python scrape.py                     # Incremental scrape all divisions
     python scrape.py --full              # Force re-scrape every game
+    python scrape.py --update            # Re-scrape stale future fixtures now in the past
     python scrape.py --division 35372    # Single division only
     python scrape.py --status            # Show DB stats, no scraping
 """
@@ -176,7 +177,7 @@ def parse_misconduct_table(soup: BeautifulSoup) -> list[dict]:
 #   "{Team}at {MM:SS} -#{num} {Name}for {Reason} [{Yellow|Red}]"
 # Note: no spaces before "at" or "for" — they run directly into the text
 _MISCONDUCT_RE = re.compile(
-    r"^(.+?)at\s+(\d{1,2}:\d{2})\s+-\s*#(\d+)\s+(.+?)for\s+(.+?)\s+\[(Yellow|Red)\]$",
+    r"^(.+?)at\s+(\d{1,2}:\d{2})\s+-\s*(?:#(\d+)\s+)?(.+?)for\s+(.+?)\s+\[(Yellow|Red)\]$",
     re.IGNORECASE,
 )
 
@@ -188,7 +189,7 @@ def _parse_misconduct_line(text: str) -> Optional[dict]:
     return {
         "team":          m.group(1).strip(),
         "minute":        m.group(2).strip(),
-        "player_number": m.group(3).strip(),
+        "player_number": m.group(3).strip() if m.group(3) else "",
         "player_name":   re.sub(r'\s*\(AP\)\s*', '', m.group(4)).strip(),
         "reason":        m.group(5).strip(),
         "card_type":     m.group(6).capitalize(),
@@ -302,6 +303,7 @@ def scrape_gamesheet(
 
     misconduct_count = 0
     if not suspensions_only:
+        corrections = db.get_name_corrections(conn, game_id)
         misconducts = parse_misconduct_table(soup)
         for m in misconducts:
             db.insert_misconduct(
@@ -309,6 +311,7 @@ def scrape_gamesheet(
                 m["player_name"], m["player_number"],
                 m["team"], m["minute"],
                 m["reason"], m["card_type"],
+                corrections=corrections,
             )
         misconduct_count = len(misconducts)
 
@@ -430,6 +433,75 @@ def cmd_rescrape_suspensions(conn) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stale-game updater
+# ---------------------------------------------------------------------------
+
+def cmd_update_stale(conn) -> None:
+    """
+    Re-scrape games that were scraped before their game date — i.e., games
+    fetched when they were still future fixtures, so their gamesheets were
+    empty.  Clears existing (empty) data and re-scrapes each one.
+    """
+    stale = conn.execute("""
+        SELECT g.id AS pk, g.game_id, d.division_id AS ext_div_id,
+               g.game_date, g.scraped_at
+        FROM games g
+        JOIN divisions d ON g.division_id = d.id
+        WHERE g.scraped_at IS NOT NULL
+          AND date(g.game_date) <= date('now')
+          AND date(g.scraped_at) < date(g.game_date)
+        ORDER BY g.game_date ASC
+    """).fetchall()
+
+    if not stale:
+        print("No stale games found — all scraped games were scraped on or after their game date.")
+        return
+
+    print(f"Found {len(stale)} game(s) scraped before their game date. Re-scraping...\n")
+    for game in stale:
+        print(f"  [{game['game_date']}] game_id={game['game_id']} (was scraped {game['scraped_at'][:10]})")
+        db.delete_game_data(conn, game["pk"])
+        conn.commit()
+        scrape_gamesheet(conn, game["pk"], game["game_id"], game["ext_div_id"], force=False)
+
+    print("\nUpdate complete.")
+    cmd_status()
+
+
+# ---------------------------------------------------------------------------
+# Date-range rescrape
+# ---------------------------------------------------------------------------
+
+def cmd_rescrape_since(conn, since_date: str) -> None:
+    """
+    Re-scrape all games with game_date >= since_date.
+    Clears existing misconduct + suspension data and re-scrapes each gamesheet.
+    """
+    games = conn.execute("""
+        SELECT g.id AS pk, g.game_id, d.division_id AS ext_div_id,
+               g.game_date, g.scraped_at
+        FROM games g
+        JOIN divisions d ON g.division_id = d.id
+        WHERE date(g.game_date) >= ?
+          AND date(g.game_date) <= date('now')
+        ORDER BY g.game_date ASC
+    """, (since_date,)).fetchall()
+
+    if not games:
+        print(f"No games found on or after {since_date}.")
+        return
+
+    print(f"Re-scraping {len(games)} game(s) from {since_date} onwards...\n")
+    for game in games:
+        db.delete_game_data(conn, game["pk"])
+        conn.commit()
+        scrape_gamesheet(conn, game["pk"], game["game_id"], game["ext_div_id"], force=False)
+
+    print("\nRescrape complete.")
+    cmd_status()
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -448,9 +520,18 @@ def main() -> None:
     parser.add_argument("--division", type=int, metavar="DIV_ID", help="Scrape a single division")
     parser.add_argument("--status", action="store_true", help="Show DB stats and exit")
     parser.add_argument(
+        "--update", action="store_true",
+        help="Re-scrape games that were scraped before their game date (stale future fixtures)",
+    )
+    parser.add_argument(
         "--rescrape-suspensions", action="store_true",
         help="Re-scrape only the suspensions section for games at/after the earliest "
              "suspension trigger. Much faster than --full; use after fixing the parser.",
+    )
+    parser.add_argument(
+        "--rescrape-since", metavar="DATE",
+        help="Re-scrape all games on or after DATE (YYYY-MM-DD). Clears and re-fetches "
+             "misconduct and suspension data for every matching game.",
     )
     args = parser.parse_args()
 
@@ -463,7 +544,11 @@ def main() -> None:
     conn = db.get_connection()
 
     try:
-        if args.rescrape_suspensions:
+        if args.update:
+            cmd_update_stale(conn)
+        elif args.rescrape_since:
+            cmd_rescrape_since(conn, args.rescrape_since)
+        elif args.rescrape_suspensions:
             cmd_rescrape_suspensions(conn)
         elif args.division:
             if args.division not in DIVISIONS:
