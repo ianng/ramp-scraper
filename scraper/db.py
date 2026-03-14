@@ -1,6 +1,6 @@
 import sqlite3
 import os
-from config import DB_PATH, DIVISIONS
+from config import DB_PATH, CLUBS, get_all_divisions
 
 
 def get_db_path() -> str:
@@ -23,12 +23,22 @@ def init_db() -> None:
     cur = conn.cursor()
 
     cur.executescript("""
+        CREATE TABLE IF NOT EXISTS organizations (
+            id INTEGER PRIMARY KEY,
+            slug TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            base_url TEXT NOT NULL,
+            org_id INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS divisions (
             id INTEGER PRIMARY KEY,
             division_id INTEGER UNIQUE,
             name TEXT,
             type TEXT,
-            level INTEGER
+            level INTEGER,
+            org_id INTEGER REFERENCES organizations(id),
+            catid INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS games (
@@ -83,17 +93,54 @@ def init_db() -> None:
         );
     """)
 
-    # Seed division records
-    for div_id, info in DIVISIONS.items():
+    # Migrate existing divisions table: add org_id and catid columns if missing
+    cols = {row[1] for row in cur.execute("PRAGMA table_info(divisions)").fetchall()}
+    if "org_id" not in cols:
+        cur.execute("ALTER TABLE divisions ADD COLUMN org_id INTEGER REFERENCES organizations(id)")
+    if "catid" not in cols:
+        cur.execute("ALTER TABLE divisions ADD COLUMN catid INTEGER")
+
+    # Seed organizations and divisions from config
+    for slug, club in CLUBS.items():
         cur.execute("""
-            INSERT OR IGNORE INTO divisions (division_id, name, type, level)
+            INSERT OR IGNORE INTO organizations (slug, name, base_url, org_id)
             VALUES (?, ?, ?, ?)
-        """, (div_id, info["name"], info["type"], info["level"]))
+        """, (slug, club["name"], club["base_url"], club["org_id"]))
+
+        # Get the org PK
+        org_pk = cur.execute(
+            "SELECT id FROM organizations WHERE slug = ?", (slug,)
+        ).fetchone()[0]
+
+        # Update org fields in case they changed
+        cur.execute("""
+            UPDATE organizations SET name = ?, base_url = ?, org_id = ?
+            WHERE slug = ?
+        """, (club["name"], club["base_url"], club["org_id"], slug))
+
+        all_divs = get_all_divisions(club)
+        for div_id, info in all_divs.items():
+            cur.execute("""
+                INSERT INTO divisions (division_id, name, type, level, org_id, catid)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(division_id) DO UPDATE SET
+                    name = excluded.name,
+                    type = excluded.type,
+                    level = excluded.level,
+                    org_id = excluded.org_id,
+                    catid = excluded.catid
+            """, (div_id, info["name"], info["type"], info["level"], org_pk, info["catid"]))
+
+    # Backfill org_id for any existing divisions that predate multi-club support
+    cur.execute("""
+        UPDATE divisions SET
+            org_id = (SELECT id FROM organizations WHERE slug = 'regina'),
+            catid = 3935
+        WHERE org_id IS NULL
+    """)
 
     # Seed known name corrections (game_id = RAMP external GID).
-    # These are applied at insert time so --full re-scrapes also pick them up.
     KNOWN_CORRECTIONS = [
-        # game_id (RAMP external GID), wrong_name, correct_name
         (1707872, "khaed issa",           "Khaled Issa"),
         (1707883, "Abdul Rahman  Nasser", "Abdulrahman Nasser"),
         (1666700, "Carlos Gonzales",      "Carlos Gonzalez"),
@@ -115,6 +162,13 @@ def init_db() -> None:
     conn.commit()
     conn.close()
     print(f"DB initialised at {get_db_path()}")
+
+
+def get_org_pk(conn: sqlite3.Connection, slug: str) -> int | None:
+    row = conn.execute(
+        "SELECT id FROM organizations WHERE slug = ?", (slug,)
+    ).fetchone()
+    return row["id"] if row else None
 
 
 def get_division_pk(conn: sqlite3.Connection, division_id: int) -> int | None:
@@ -239,27 +293,49 @@ def clear_suspension_data(conn: sqlite3.Connection, game_pk: int) -> None:
     conn.execute("UPDATE games SET scraped_at = NULL WHERE id = ?", (game_pk,))
 
 
-def get_stats(conn: sqlite3.Connection) -> dict:
+def get_stats(conn: sqlite3.Connection, org_slug: str | None = None) -> dict:
+    """Get DB stats, optionally filtered to a single organization."""
     stats = {}
-    stats["divisions"] = conn.execute("SELECT COUNT(*) FROM divisions").fetchone()[0]
-    stats["games_total"] = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
-    stats["games_scraped"] = conn.execute(
-        "SELECT COUNT(*) FROM games WHERE scraped_at IS NOT NULL"
-    ).fetchone()[0]
-    stats["misconducts"] = conn.execute("SELECT COUNT(*) FROM misconducts").fetchone()[0]
-    stats["yellows"] = conn.execute(
-        "SELECT COUNT(*) FROM misconducts WHERE card_type = 'Yellow'"
-    ).fetchone()[0]
-    stats["reds"] = conn.execute(
-        "SELECT COUNT(*) FROM misconducts WHERE card_type = 'Red'"
-    ).fetchone()[0]
-    stats["suspensions_served"] = conn.execute(
-        "SELECT COUNT(*) FROM suspensions_served"
-    ).fetchone()[0]
-    stats["printable_suspensions"] = conn.execute(
-        "SELECT COUNT(*) FROM printable_suspensions"
-    ).fetchone()[0]
-    stats["last_scraped"] = conn.execute(
-        "SELECT MAX(scraped_at) FROM games"
-    ).fetchone()[0]
+
+    def _count(sql: str, params: tuple = ()) -> int:
+        return conn.execute(sql, params).fetchone()[0]
+
+    if org_slug:
+        p = (org_slug,)
+        org_join = (
+            "JOIN divisions d ON d.id = g.division_id "
+            "JOIN organizations o ON d.org_id = o.id"
+        )
+        org_where = "o.slug = ?"
+
+        stats["divisions"] = _count(
+            f"SELECT COUNT(*) FROM divisions d JOIN organizations o ON d.org_id = o.id WHERE {org_where}", p)
+        stats["games_total"] = _count(
+            f"SELECT COUNT(*) FROM games g {org_join} WHERE {org_where}", p)
+        stats["games_scraped"] = _count(
+            f"SELECT COUNT(*) FROM games g {org_join} WHERE {org_where} AND g.scraped_at IS NOT NULL", p)
+        stats["misconducts"] = _count(
+            f"SELECT COUNT(*) FROM misconducts m JOIN games g ON m.game_id = g.id {org_join} WHERE {org_where}", p)
+        stats["yellows"] = _count(
+            f"SELECT COUNT(*) FROM misconducts m JOIN games g ON m.game_id = g.id {org_join} WHERE {org_where} AND m.card_type = 'Yellow'", p)
+        stats["reds"] = _count(
+            f"SELECT COUNT(*) FROM misconducts m JOIN games g ON m.game_id = g.id {org_join} WHERE {org_where} AND m.card_type = 'Red'", p)
+        stats["suspensions_served"] = _count(
+            f"SELECT COUNT(*) FROM suspensions_served s JOIN games g ON s.game_id = g.id {org_join} WHERE {org_where}", p)
+        stats["printable_suspensions"] = _count(
+            f"SELECT COUNT(*) FROM printable_suspensions ps JOIN games g ON ps.game_id = g.id {org_join} WHERE {org_where}", p)
+        stats["last_scraped"] = conn.execute(
+            f"SELECT MAX(g.scraped_at) FROM games g {org_join} WHERE {org_where}", p
+        ).fetchone()[0]
+    else:
+        stats["divisions"] = _count("SELECT COUNT(*) FROM divisions")
+        stats["games_total"] = _count("SELECT COUNT(*) FROM games")
+        stats["games_scraped"] = _count("SELECT COUNT(*) FROM games WHERE scraped_at IS NOT NULL")
+        stats["misconducts"] = _count("SELECT COUNT(*) FROM misconducts")
+        stats["yellows"] = _count("SELECT COUNT(*) FROM misconducts WHERE card_type = 'Yellow'")
+        stats["reds"] = _count("SELECT COUNT(*) FROM misconducts WHERE card_type = 'Red'")
+        stats["suspensions_served"] = _count("SELECT COUNT(*) FROM suspensions_served")
+        stats["printable_suspensions"] = _count("SELECT COUNT(*) FROM printable_suspensions")
+        stats["last_scraped"] = conn.execute("SELECT MAX(scraped_at) FROM games").fetchone()[0]
+
     return stats

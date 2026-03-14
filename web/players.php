@@ -5,10 +5,19 @@ require_once __DIR__ . '/includes/rules.php';
 $pdo = get_pdo();
 $page_title = 'Players';
 
-$divisions = $pdo->query("SELECT * FROM divisions ORDER BY type, name")->fetchAll();
+include __DIR__ . '/includes/header.php';
+$org_f = org_filter($current_org);
+
+if ($current_org) {
+    $stmt = $pdo->prepare("SELECT * FROM divisions d WHERE 1=1" . $org_f['where'] . " ORDER BY type, name");
+    $stmt->execute($org_f['params']);
+    $divisions = $stmt->fetchAll();
+} else {
+    $divisions = $pdo->query("SELECT * FROM divisions ORDER BY type, name")->fetchAll();
+}
 
 $_w_sql = weight_sql('m.reason', 'm.card_type', 'm.player_name');
-$players = $pdo->query("
+$players_sql = "
     SELECT m.player_name,
            GROUP_CONCAT(DISTINCT m.team) AS teams,
            GROUP_CONCAT(DISTINCT d.name) AS divisions,
@@ -24,10 +33,17 @@ $players = $pdo->query("
     FROM misconducts m
     JOIN games g ON m.game_id = g.id
     JOIN divisions d ON g.division_id = d.id
-    WHERE m.player_name != 'Bench Penalty'
+    WHERE m.player_name != 'Bench Penalty'{$org_f['where']}
     GROUP BY m.player_name
     ORDER BY yellows DESC, reds DESC, m.player_name ASC
-")->fetchAll();
+";
+if ($org_f['params']) {
+    $stmt_players = $pdo->prepare($players_sql);
+    $stmt_players->execute($org_f['params']);
+    $players = $stmt_players->fetchAll();
+} else {
+    $players = $pdo->query($players_sql)->fetchAll();
+}
 
 // Pre-compute compliance for players at or past a suspension threshold.
 $susp_map = [];
@@ -50,9 +66,13 @@ foreach ($players as $p) {
 }
 usort($alerts, fn($a, $b) => $b['unserved'] <=> $a['unserved']);
 
-$all_teams = $pdo->query("SELECT DISTINCT team FROM misconducts ORDER BY team ASC")->fetchAll(PDO::FETCH_COLUMN);
-
-include __DIR__ . '/includes/header.php';
+if ($current_org) {
+    $stmt_teams = $pdo->prepare("SELECT DISTINCT m.team FROM misconducts m JOIN games g ON m.game_id = g.id JOIN divisions d ON g.division_id = d.id WHERE 1=1" . $org_f['where'] . " ORDER BY m.team ASC");
+    $stmt_teams->execute($org_f['params']);
+    $all_teams = $stmt_teams->fetchAll(PDO::FETCH_COLUMN);
+} else {
+    $all_teams = $pdo->query("SELECT DISTINCT team FROM misconducts ORDER BY team ASC")->fetchAll(PDO::FETCH_COLUMN);
+}
 ?>
 
 <!-- ── Filters Bar ────────────────────────────────────────────────────────── -->
@@ -153,7 +173,7 @@ foreach ($players as $p):
                 data-next="<?= $next ?? 999 ?>"
                 data-served="<?= htmlspecialchars($served_label) ?>">
                 <td class="px-4 py-2 font-medium">
-                    <a href="player.php?name=<?= urlencode($p['player_name']) ?>" class="text-primary hover:underline">
+                    <a href="player.php?name=<?= urlencode($p['player_name']) ?><?= club_param() ?>" class="text-primary hover:underline">
                         <?= htmlspecialchars($p['player_name']) ?>
                     </a>
                 </td>
@@ -208,7 +228,7 @@ foreach ($players as $p):
         <?php foreach ($alerts as $a): ?>
         <div class="bg-red-50 border border-red-200 rounded-lg p-4">
             <div class="font-semibold">
-                <a href="player.php?name=<?= urlencode($a['player']) ?>" class="text-red-800 hover:underline">
+                <a href="player.php?name=<?= urlencode($a['player']) ?><?= club_param() ?>" class="text-red-800 hover:underline">
                     <?= htmlspecialchars($a['player']) ?>
                 </a>
             </div>
@@ -418,7 +438,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 data-next="${p.next_threshold ?? 999}"
                 data-served="${esc(p.served_label)}">
                 <td class="px-4 py-2 font-medium">
-                    <a href="player.php?name=${encodeURIComponent(p.name)}" class="text-primary hover:underline">${esc(p.name)}</a>
+                    <a href="player.php?name=${encodeURIComponent(p.name)}<?= club_param() ?>" class="text-primary hover:underline">${esc(p.name)}</a>
                 </td>
                 <td class="px-4 py-2" data-label="Team">${esc(p.teams.join(', '))}</td>
                 <td class="px-4 py-2 text-xs" data-label="Division">${esc(p.divisions.join(', '))}</td>
@@ -448,6 +468,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (ymax) params.set('max_yellows', ymax);
 
         tbody.innerHTML = '<tr><td colspan="9" class="px-4 py-8 text-center text-gray-400">Loading…</td></tr>';
+
+        <?php if ($club_slug): ?>params.set('club', <?= json_encode($club_slug) ?>);<?php endif; ?>
 
         try {
             const res  = await fetch('api.php?' + params.toString());

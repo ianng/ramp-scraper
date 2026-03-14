@@ -9,6 +9,10 @@ function fmt_date(string $iso): string {
 
 $team_name = trim($_GET['name'] ?? '');
 $pdo       = get_pdo();
+$club_slug   = $_GET['club'] ?? null;
+$current_org = $club_slug ? get_org($pdo, $club_slug) : null;
+if ($club_slug && !$current_org) $club_slug = null;
+$org_f     = org_filter($current_org);
 
 $type_badge = [
     'mens'   => 'bg-blue-100 text-blue-700',
@@ -24,15 +28,18 @@ $type_order = ['mens', 'womens', 'coed'];
 $type_label = ['mens' => 'Mens', 'womens' => 'Womens', 'coed' => 'Coed'];
 
 // ── Sidebar data: teams grouped by division, ordered by type ───────────────
-$sidebar_rows = $pdo->query("
+$sidebar_stmt = $pdo->prepare("
     SELECT m.team, d.name AS division_name, d.division_id, d.type
     FROM misconducts m
     JOIN games g ON m.game_id = g.id
     JOIN divisions d ON g.division_id = d.id
+    WHERE 1=1 {$org_f['where']}
     GROUP BY m.team, d.division_id
     ORDER BY CASE d.type WHEN 'mens' THEN 1 WHEN 'womens' THEN 2 WHEN 'coed' THEN 3 ELSE 4 END,
              d.name, m.team
-")->fetchAll();
+");
+$sidebar_stmt->execute($org_f['params']);
+$sidebar_rows = $sidebar_stmt->fetchAll();
 
 $sidebar = []; // [type][division_name] => ['division_id' => X, 'teams' => [...]]
 foreach ($sidebar_rows as $row) {
@@ -251,7 +258,7 @@ $sidebar_open = ($team_name === '');
                     <?php foreach ($div_data['teams'] as $t):
                         $is_active = $t === $team_name;
                     ?>
-                    <a href="team.php?name=<?= urlencode($t) ?>"
+                    <a href="team.php?name=<?= urlencode($t) ?><?= club_param() ?>"
                        data-name="<?= htmlspecialchars(strtolower($t)) ?>"
                        class="team-item block px-4 py-2 text-sm border-t border-gray-50 transition-colors <?= $is_active ? 'bg-primary/10 text-primary font-semibold border-l-4 ' . $type_border[$type] : 'text-gray-700 hover:bg-gray-50 border-l-4 border-transparent' ?>">
                         <?= htmlspecialchars($t) ?>
@@ -298,7 +305,7 @@ $sidebar_open = ($team_name === '');
             </span>
             <?php endforeach; ?>
             <?php foreach ($team_divisions as $div): ?>
-            <a href="division.php?id=<?= (int)$div['division_id'] ?>"
+            <a href="division.php?id=<?= (int)$div['division_id'] ?><?= club_param() ?>"
                class="bg-accent/20 text-green-900 text-xs font-medium px-2.5 py-0.5 rounded hover:bg-accent/40 transition-colors">
                 <?= htmlspecialchars($div['name']) ?>
             </a>
@@ -428,7 +435,7 @@ $tl_reds    = json_encode(array_values(array_column($team_timeline, 'reds')));
                 <tr class="bg-orange-50">
                     <td class="px-4 py-2"><?= fmt_date($bc['game_date']) ?></td>
                     <td class="px-4 py-2">
-                        <a href="division.php?id=<?= (int)$bc['division_id'] ?>" class="text-primary hover:underline">
+                        <a href="division.php?id=<?= (int)$bc['division_id'] ?><?= club_param() ?>" class="text-primary hover:underline">
                             <?= htmlspecialchars($bc['division_name']) ?>
                         </a>
                     </td>
@@ -473,7 +480,7 @@ $tl_reds    = json_encode(array_values(array_column($team_timeline, 'reds')));
                 ?>
                 <tr class="hover:bg-gray-50">
                     <td class="px-4 py-2 font-medium">
-                        <a href="player.php?name=<?= urlencode($p['player_name']) ?>" class="text-primary hover:underline">
+                        <a href="player.php?name=<?= urlencode($p['player_name']) ?><?= club_param() ?>" class="text-primary hover:underline">
                             <?= htmlspecialchars($p['player_name']) ?>
                         </a>
                         <?php if ((int)$p['yellows'] >= 3): ?>
@@ -510,7 +517,7 @@ $tl_reds    = json_encode(array_values(array_column($team_timeline, 'reds')));
                 <?php foreach ($matchups as $m): ?>
                 <tr class="hover:bg-gray-50">
                     <td class="px-4 py-2 font-medium">
-                        <a href="team.php?name=<?= urlencode($m['opponent']) ?>" class="text-primary hover:underline">
+                        <a href="team.php?name=<?= urlencode($m['opponent']) ?><?= club_param() ?>" class="text-primary hover:underline">
                             <?= htmlspecialchars($m['opponent']) ?>
                         </a>
                     </td>
@@ -551,7 +558,7 @@ $tl_reds    = json_encode(array_values(array_column($team_timeline, 'reds')));
                 <tr class="<?= $row_class ?>">
                     <td class="px-4 py-2"><?= fmt_date($c['game_date']) ?></td>
                     <td class="px-4 py-2">
-                        <a href="division.php?id=<?= (int)$c['division_id'] ?>" class="text-primary hover:underline">
+                        <a href="division.php?id=<?= (int)$c['division_id'] ?><?= club_param() ?>" class="text-primary hover:underline">
                             <?= htmlspecialchars($c['division_name']) ?>
                         </a>
                     </td>
@@ -564,7 +571,7 @@ $tl_reds    = json_encode(array_values(array_column($team_timeline, 'reds')));
                         <?php if ($is_bench): ?>
                             <span class="inline-block bg-orange-100 text-orange-700 text-xs px-1.5 py-0.5 rounded font-semibold mr-1">Bench</span>
                         <?php else: ?>
-                        <a href="player.php?name=<?= urlencode($c['player_name']) ?>" class="text-primary hover:underline">
+                        <a href="player.php?name=<?= urlencode($c['player_name']) ?><?= club_param() ?>" class="text-primary hover:underline">
                             <?= htmlspecialchars($c['player_name']) ?>
                         </a>
                         <?php endif; ?>
@@ -645,7 +652,7 @@ $tl_reds    = json_encode(array_values(array_column($team_timeline, 'reds')));
             <?php endif; ?>
             <div class="mt-4 pt-3 border-t border-gray-100 text-xs text-gray-400 flex justify-between items-center">
                 <span>Based on the Canadian Soccer Disciplinary Code</span>
-                <a href="scoring.php" class="text-primary hover:underline">Scoring Guide &rarr;</a>
+                <a href="scoring.php<?= club_param_first() ?>" class="text-primary hover:underline">Scoring Guide &rarr;</a>
             </div>
         </div>
     </div>

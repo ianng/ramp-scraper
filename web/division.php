@@ -9,6 +9,10 @@ function fmt_date(string $iso): string {
 
 $div_id = (int)($_GET['id'] ?? 0);
 $pdo    = get_pdo();
+$club_slug   = $_GET['club'] ?? null;
+$current_org = $club_slug ? get_org($pdo, $club_slug) : null;
+if ($club_slug && !$current_org) $club_slug = null;
+$org_f  = org_filter($current_org);
 
 $type_badge = [
     'mens'   => 'bg-blue-100 text-blue-700',
@@ -24,7 +28,7 @@ $type_order = ['mens', 'womens', 'coed'];
 $type_label = ['mens' => 'Mens', 'womens' => 'Womens', 'coed' => 'Coed'];
 
 // ── All divisions with aggregate stats (for sidebar) ───────────────────────
-$all_divs = $pdo->query("
+$all_divs_stmt = $pdo->prepare("
     SELECT d.*,
            COUNT(DISTINCT g.id)                                        AS total_games,
            SUM(CASE WHEN m.card_type='Yellow' THEN 1 ELSE 0 END)       AS yellows,
@@ -33,9 +37,12 @@ $all_divs = $pdo->query("
     FROM divisions d
     LEFT JOIN games g ON g.division_id = d.id
     LEFT JOIN misconducts m ON m.game_id = g.id
+    WHERE 1=1 {$org_f['where']}
     GROUP BY d.id
     ORDER BY d.type, d.name
-")->fetchAll();
+");
+$all_divs_stmt->execute($org_f['params']);
+$all_divs = $all_divs_stmt->fetchAll();
 
 $divs_by_type = [];
 foreach ($all_divs as $d) {
@@ -254,7 +261,7 @@ $sidebar_open = ($div_id === 0);
             <?php foreach ($divs_by_type[$type] as $d):
                 $is_active = (int)$d['division_id'] === $div_id;
             ?>
-            <a href="division.php?id=<?= (int)$d['division_id'] ?>"
+            <a href="division.php?id=<?= (int)$d['division_id'] ?><?= club_param() ?>"
                class="block px-3 py-2 border-t border-gray-50 transition-colors <?= $is_active ? 'bg-primary/10 border-l-4 ' . $type_border[$type] : 'hover:bg-gray-50 border-l-4 border-transparent' ?>">
                 <div class="text-sm font-medium <?= $is_active ? 'text-primary' : 'text-gray-700' ?> leading-tight">
                     <?= htmlspecialchars($d['name']) ?>
@@ -436,7 +443,7 @@ $sidebar_open = ($div_id === 0);
                 <tr class="hover:bg-gray-50">
                     <td class="px-4 py-2 text-gray-400"><?= $i + 1 ?></td>
                     <td class="px-4 py-2 font-medium">
-                        <a href="team.php?name=<?= urlencode($t['team']) ?>" class="text-primary hover:underline">
+                        <a href="team.php?name=<?= urlencode($t['team']) ?><?= club_param() ?>" class="text-primary hover:underline">
                             <?= htmlspecialchars($t['team']) ?>
                         </a>
                     </td>
@@ -470,12 +477,12 @@ $sidebar_open = ($div_id === 0);
                 <?php foreach ($top_players as $p): ?>
                 <tr class="hover:bg-gray-50">
                     <td class="px-4 py-2 font-medium">
-                        <a href="player.php?name=<?= urlencode($p['player_name']) ?>" class="text-primary hover:underline">
+                        <a href="player.php?name=<?= urlencode($p['player_name']) ?><?= club_param() ?>" class="text-primary hover:underline">
                             <?= htmlspecialchars($p['player_name']) ?>
                         </a>
                     </td>
                     <td class="px-4 py-2">
-                        <a href="team.php?name=<?= urlencode($p['team']) ?>" class="text-primary hover:underline">
+                        <a href="team.php?name=<?= urlencode($p['team']) ?><?= club_param() ?>" class="text-primary hover:underline">
                             <?= htmlspecialchars($p['team']) ?>
                         </a>
                     </td>

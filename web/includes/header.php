@@ -5,6 +5,24 @@
 
 $page_title = $page_title ?? 'Misconduct Tracker';
 
+// ── Club context ─────────────────────────────────────────────────────────────
+$club_slug   = $_GET['club'] ?? null;
+$current_org = null;
+$all_orgs    = [];
+
+// Only resolve club context if db.php is loaded (it should always be)
+if (function_exists('get_pdo')) {
+    $pdo_header = get_pdo();
+    $all_orgs    = get_all_orgs($pdo_header);
+    $current_org = $club_slug ? get_org($pdo_header, $club_slug) : null;
+    // If slug was provided but not found, clear it
+    if ($club_slug && !$current_org) {
+        $club_slug = null;
+    }
+}
+
+$org_display_name = $current_org ? $current_org['name'] : 'All Clubs';
+
 // Active nav detection
 $_nav_page = basename($_SERVER['PHP_SELF'] ?? 'index.php');
 $_nav_view = $_GET['view'] ?? '';
@@ -15,13 +33,21 @@ function nav_active(string $page, string $view = ''): string {
     if ($view === '' && in_array($_nav_view, ['teams', 'divisions', 'discrepancies'])) return '';
     return 'text-accent font-semibold';
 }
+
+// Build nav link with club param preserved
+function nav_href(string $base): string {
+    global $club_slug;
+    if (!$club_slug) return $base;
+    $sep = str_contains($base, '?') ? '&' : '?';
+    return $base . $sep . 'club=' . urlencode($club_slug);
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= htmlspecialchars($page_title) ?></title>
+    <title><?= htmlspecialchars($page_title) ?><?= $current_org ? ' — ' . htmlspecialchars($current_org['name']) : '' ?></title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -94,13 +120,28 @@ function nav_active(string $page, string $view = ''): string {
 
 <nav class="bg-primary text-white shadow-md">
     <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
-        <a href="index.php" class="flex items-center gap-2 font-bold text-lg tracking-tight">
+        <a href="<?= nav_href('index.php') ?>" class="flex items-center gap-2 font-bold text-lg tracking-tight">
             <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
                 <circle cx="10" cy="10" r="9" stroke="white" stroke-width="1.5" fill="none"/>
                 <path d="M10 2 L10 18 M2 10 L18 10" stroke="white" stroke-width="1"/>
             </svg>
             Misconduct Tracker
         </a>
+
+        <?php if (count($all_orgs) > 1): ?>
+        <!-- Club switcher -->
+        <select id="club-switcher"
+                class="hidden md:block bg-white/10 text-white text-sm rounded px-2 py-1 border border-white/20 hover:bg-white/20 transition-colors cursor-pointer"
+                onchange="switchClub(this.value)">
+            <option value="" <?= !$club_slug ? 'selected' : '' ?>>All Clubs</option>
+            <?php foreach ($all_orgs as $org): ?>
+            <option value="<?= htmlspecialchars($org['slug']) ?>" <?= $club_slug === $org['slug'] ? 'selected' : '' ?>>
+                <?= htmlspecialchars($org['name']) ?>
+            </option>
+            <?php endforeach; ?>
+        </select>
+        <?php endif; ?>
+
         <!-- Hamburger button (mobile only) -->
         <button id="nav-toggle" class="md:hidden p-1 rounded hover:bg-white/10 transition-colors" aria-label="Toggle navigation">
             <svg id="nav-icon-menu" class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -112,25 +153,41 @@ function nav_active(string $page, string $view = ''): string {
         </button>
         <!-- Desktop nav links -->
         <div class="hidden md:flex gap-6 text-sm">
-            <a href="index.php" class="hover:text-accent transition-colors <?= nav_active('index.php') ?>">Dashboard</a>
-            <a href="players.php" class="hover:text-accent transition-colors <?= nav_active('players.php') ?>">Players</a>
-            <a href="team.php" class="hover:text-accent transition-colors <?= nav_active('team.php') ?>">Teams</a>
-            <a href="division.php" class="hover:text-accent transition-colors <?= nav_active('division.php') ?>">Divisions</a>
-            <a href="index.php?view=teams" class="hover:text-accent transition-colors <?= nav_active('index.php', 'teams') ?>">Discipline Rankings</a>
-            <a href="index.php?view=discrepancies" class="hover:text-accent transition-colors <?= nav_active('index.php', 'discrepancies') ?>">Discrepancies</a>
-            <a href="scoring.php" class="hover:text-accent transition-colors <?= nav_active('scoring.php') ?>">Scoring Guide</a>
+            <a href="<?= nav_href('index.php') ?>" class="hover:text-accent transition-colors <?= nav_active('index.php') ?>">Dashboard</a>
+            <a href="<?= nav_href('players.php') ?>" class="hover:text-accent transition-colors <?= nav_active('players.php') ?>">Players</a>
+            <a href="<?= nav_href('team.php') ?>" class="hover:text-accent transition-colors <?= nav_active('team.php') ?>">Teams</a>
+            <a href="<?= nav_href('division.php') ?>" class="hover:text-accent transition-colors <?= nav_active('division.php') ?>">Divisions</a>
+            <a href="<?= nav_href('index.php?view=teams') ?>" class="hover:text-accent transition-colors <?= nav_active('index.php', 'teams') ?>">Discipline Rankings</a>
+            <a href="<?= nav_href('index.php?view=discrepancies') ?>" class="hover:text-accent transition-colors <?= nav_active('index.php', 'discrepancies') ?>">Discrepancies</a>
+            <a href="<?= nav_href('scoring.php') ?>" class="hover:text-accent transition-colors <?= nav_active('scoring.php') ?>">Scoring Guide</a>
+            <a href="<?= nav_href('report.php') ?>" class="hover:text-accent transition-colors <?= nav_active('report.php') ?>">Reports</a>
         </div>
     </div>
     <!-- Mobile nav drawer -->
     <div id="nav-drawer" class="hidden border-t border-white/20 md:hidden">
         <div class="max-w-7xl mx-auto px-4 py-2 flex flex-col text-sm">
-            <a href="index.php" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('index.php') ?>">Dashboard</a>
-            <a href="players.php" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('players.php') ?>">Players</a>
-            <a href="team.php" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('team.php') ?>">Teams</a>
-            <a href="division.php" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('division.php') ?>">Divisions</a>
-            <a href="index.php?view=teams" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('index.php', 'teams') ?>">Discipline Rankings</a>
-            <a href="index.php?view=discrepancies" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('index.php', 'discrepancies') ?>">Discrepancies</a>
-            <a href="scoring.php" class="py-2.5 hover:text-accent transition-colors <?= nav_active('scoring.php') ?>">Scoring Guide</a>
+            <?php if (count($all_orgs) > 1): ?>
+            <div class="py-2.5 border-b border-white/10">
+                <select id="club-switcher-mobile"
+                        class="w-full bg-white/10 text-white text-sm rounded px-2 py-1.5 border border-white/20"
+                        onchange="switchClub(this.value)">
+                    <option value="" <?= !$club_slug ? 'selected' : '' ?>>All Clubs</option>
+                    <?php foreach ($all_orgs as $org): ?>
+                    <option value="<?= htmlspecialchars($org['slug']) ?>" <?= $club_slug === $org['slug'] ? 'selected' : '' ?>>
+                        <?= htmlspecialchars($org['name']) ?>
+                    </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <?php endif; ?>
+            <a href="<?= nav_href('index.php') ?>" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('index.php') ?>">Dashboard</a>
+            <a href="<?= nav_href('players.php') ?>" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('players.php') ?>">Players</a>
+            <a href="<?= nav_href('team.php') ?>" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('team.php') ?>">Teams</a>
+            <a href="<?= nav_href('division.php') ?>" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('division.php') ?>">Divisions</a>
+            <a href="<?= nav_href('index.php?view=teams') ?>" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('index.php', 'teams') ?>">Discipline Rankings</a>
+            <a href="<?= nav_href('index.php?view=discrepancies') ?>" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('index.php', 'discrepancies') ?>">Discrepancies</a>
+            <a href="<?= nav_href('scoring.php') ?>" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('scoring.php') ?>">Scoring Guide</a>
+            <a href="<?= nav_href('report.php') ?>" class="py-2.5 hover:text-accent transition-colors <?= nav_active('report.php') ?>">Reports</a>
         </div>
     </div>
 </nav>
@@ -140,6 +197,15 @@ document.getElementById('nav-toggle').addEventListener('click', function() {
     document.getElementById('nav-icon-menu').classList.toggle('hidden');
     document.getElementById('nav-icon-close').classList.toggle('hidden');
 });
+function switchClub(slug) {
+    const url = new URL(window.location);
+    if (slug) {
+        url.searchParams.set('club', slug);
+    } else {
+        url.searchParams.delete('club');
+    }
+    window.location = url.toString();
+}
 </script>
 
 <main class="max-w-7xl mx-auto px-4 py-6">

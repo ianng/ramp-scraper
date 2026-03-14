@@ -5,10 +5,28 @@ require_once __DIR__ . '/includes/rules.php';
 $pdo  = get_pdo();
 $view = $_GET['view'] ?? 'players';
 
-$last_scraped = $pdo->query("SELECT MAX(scraped_at) FROM games")->fetchColumn();
+// Early club context (header.php sets these too, but we need them before include)
+$club_slug   = $_GET['club'] ?? null;
+$current_org = $club_slug ? get_org($pdo, $club_slug) : null;
+if ($club_slug && !$current_org) $club_slug = null;
+$org_f = org_filter($current_org);
+
+if ($current_org) {
+    $stmt = $pdo->prepare("SELECT MAX(g.scraped_at) FROM games g JOIN divisions d ON g.division_id = d.id WHERE 1=1" . $org_f['where']);
+    $stmt->execute($org_f['params']);
+    $last_scraped = $stmt->fetchColumn();
+} else {
+    $last_scraped = $pdo->query("SELECT MAX(scraped_at) FROM games")->fetchColumn();
+}
 
 // Divisions list — used by filter dropdowns in multiple views
-$divisions = $pdo->query("SELECT * FROM divisions ORDER BY type, name")->fetchAll();
+if ($current_org) {
+    $stmt = $pdo->prepare("SELECT * FROM divisions d WHERE 1=1" . $org_f['where'] . " ORDER BY type, name");
+    $stmt->execute($org_f['params']);
+    $divisions = $stmt->fetchAll();
+} else {
+    $divisions = $pdo->query("SELECT * FROM divisions ORDER BY type, name")->fetchAll();
+}
 
 // ── Page title ─────────────────────────────────────────────────────────────
 // Divisions moved to division.php
@@ -61,10 +79,10 @@ $stmt = $pdo->prepare("
     FROM misconducts m
     JOIN games g ON m.game_id = g.id
     JOIN divisions d ON g.division_id = d.id
-    WHERE 1=1 $where_sql
+    WHERE 1=1 $where_sql {$org_f['where']}
     GROUP BY m.team
 ");
-$stmt->execute($where_params);
+$stmt->execute(array_merge($where_params, $org_f['params']));
 $teams_raw = $stmt->fetchAll();
 
 foreach ($teams_raw as &$t) {
@@ -84,6 +102,7 @@ $type_badge = [
 
 <form method="get" class="bg-white rounded-lg shadow p-4 mb-5 flex flex-wrap items-end gap-3">
     <input type="hidden" name="view" value="teams">
+    <?php if ($club_slug): ?><input type="hidden" name="club" value="<?= htmlspecialchars($club_slug) ?>"><?php endif; ?>
     <div>
         <label class="block text-xs font-medium text-gray-500 mb-1">Division Type</label>
         <select name="div_type" class="border rounded px-3 py-1.5 text-sm">
@@ -108,7 +127,7 @@ $type_badge = [
         Filter
     </button>
     <?php if ($f_type || $f_div): ?>
-    <a href="?view=teams" class="text-sm text-gray-500 hover:underline self-end pb-1.5">Clear</a>
+    <a href="<?= club_url('?view=teams') ?>" class="text-sm text-gray-500 hover:underline self-end pb-1.5">Clear</a>
     <?php endif; ?>
 </form>
 
@@ -151,7 +170,7 @@ $type_badge = [
             <tr class="hover:bg-gray-50">
                 <td class="px-4 py-2 text-gray-400"><?= $i + 1 ?></td>
                 <td class="px-4 py-2 font-medium">
-                    <a href="team.php?name=<?= urlencode($t['team']) ?>" class="text-primary hover:underline">
+                    <a href="team.php?name=<?= urlencode($t['team']) ?><?= club_param() ?>" class="text-primary hover:underline">
                         <?= htmlspecialchars($t['team']) ?>
                     </a>
                 </td>
@@ -190,19 +209,29 @@ if ($f_div > 0) {
         SELECT DISTINCT m.player_name FROM misconducts m
         JOIN games g ON m.game_id = g.id
         JOIN divisions d ON g.division_id = d.id
-        WHERE d.division_id = ?
+        WHERE d.division_id = ? {$org_f['where']}
     ");
-    $stmt->execute([$f_div]);
+    $stmt->execute(array_merge([$f_div], $org_f['params']));
 } elseif ($f_type !== '') {
     $stmt = $pdo->prepare("
         SELECT DISTINCT m.player_name FROM misconducts m
         JOIN games g ON m.game_id = g.id
         JOIN divisions d ON g.division_id = d.id
-        WHERE d.type = ?
+        WHERE d.type = ? {$org_f['where']}
     ");
-    $stmt->execute([$f_type]);
+    $stmt->execute(array_merge([$f_type], $org_f['params']));
 } else {
-    $stmt = $pdo->query("SELECT DISTINCT player_name FROM misconducts");
+    if ($current_org) {
+        $stmt = $pdo->prepare("
+            SELECT DISTINCT m.player_name FROM misconducts m
+            JOIN games g ON m.game_id = g.id
+            JOIN divisions d ON g.division_id = d.id
+            WHERE 1=1 {$org_f['where']}
+        ");
+        $stmt->execute($org_f['params']);
+    } else {
+        $stmt = $pdo->query("SELECT DISTINCT player_name FROM misconducts");
+    }
 }
 $all_players = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
@@ -224,6 +253,7 @@ usort($discrepancies, fn($a, $b) => $b['unserved'] <=> $a['unserved']);
 
 <form method="get" class="bg-white rounded-lg shadow p-4 mb-5 flex flex-wrap items-end gap-3">
     <input type="hidden" name="view" value="discrepancies">
+    <?php if ($club_slug): ?><input type="hidden" name="club" value="<?= htmlspecialchars($club_slug) ?>"><?php endif; ?>
     <div>
         <label class="block text-xs font-medium text-gray-500 mb-1">Division Type</label>
         <select name="div_type" class="border rounded px-3 py-1.5 text-sm">
@@ -248,7 +278,7 @@ usort($discrepancies, fn($a, $b) => $b['unserved'] <=> $a['unserved']);
         Filter
     </button>
     <?php if ($f_type || $f_div): ?>
-    <a href="?view=discrepancies" class="text-sm text-gray-500 hover:underline self-end pb-1.5">Clear</a>
+    <a href="<?= club_url('?view=discrepancies') ?>" class="text-sm text-gray-500 hover:underline self-end pb-1.5">Clear</a>
     <?php endif; ?>
 </form>
 
@@ -279,7 +309,7 @@ usort($discrepancies, fn($a, $b) => $b['unserved'] <=> $a['unserved']);
             <?php foreach ($discrepancies as $d): ?>
             <tr class="hover:bg-red-50">
                 <td class="px-4 py-2 font-medium">
-                    <a href="player.php?name=<?= urlencode($d['player']) ?>" class="text-primary hover:underline">
+                    <a href="player.php?name=<?= urlencode($d['player']) ?><?= club_param() ?>" class="text-primary hover:underline">
                         <?= htmlspecialchars($d['player']) ?>
                     </a>
                 </td>
@@ -306,26 +336,62 @@ usort($discrepancies, fn($a, $b) => $b['unserved'] <=> $a['unserved']);
      ══════════════════════════════════════════════════════════════════════════ -->
 <?php
 // Stats for the dashboard summary bar
-$total_yellows  = (int)$pdo->query("SELECT COUNT(*) FROM misconducts WHERE card_type='Yellow'")->fetchColumn();
-$total_reds     = (int)$pdo->query("SELECT COUNT(*) FROM misconducts WHERE card_type='Red'")->fetchColumn();
-$total_games    = (int)$pdo->query("SELECT COUNT(*) FROM games WHERE scraped_at IS NOT NULL")->fetchColumn();
-$total_divs     = (int)$pdo->query("SELECT COUNT(*) FROM divisions")->fetchColumn();
-$total_teams    = (int)$pdo->query("SELECT COUNT(DISTINCT team) FROM misconducts")->fetchColumn();
+if ($current_org) {
+    $o = $org_f['params'];
+    $ow = $org_f['where'];
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM misconducts m JOIN games g ON m.game_id=g.id JOIN divisions d ON g.division_id=d.id WHERE m.card_type='Yellow' $ow");
+    $stmt->execute($o); $total_yellows = (int)$stmt->fetchColumn();
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM misconducts m JOIN games g ON m.game_id=g.id JOIN divisions d ON g.division_id=d.id WHERE m.card_type='Red' $ow");
+    $stmt->execute($o); $total_reds = (int)$stmt->fetchColumn();
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM games g JOIN divisions d ON g.division_id=d.id WHERE g.scraped_at IS NOT NULL $ow");
+    $stmt->execute($o); $total_games = (int)$stmt->fetchColumn();
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM divisions d WHERE 1=1 $ow");
+    $stmt->execute($o); $total_divs = (int)$stmt->fetchColumn();
+    $stmt = $pdo->prepare("SELECT COUNT(DISTINCT m.team) FROM misconducts m JOIN games g ON m.game_id=g.id JOIN divisions d ON g.division_id=d.id WHERE 1=1 $ow");
+    $stmt->execute($o); $total_teams = (int)$stmt->fetchColumn();
+} else {
+    $total_yellows  = (int)$pdo->query("SELECT COUNT(*) FROM misconducts WHERE card_type='Yellow'")->fetchColumn();
+    $total_reds     = (int)$pdo->query("SELECT COUNT(*) FROM misconducts WHERE card_type='Red'")->fetchColumn();
+    $total_games    = (int)$pdo->query("SELECT COUNT(*) FROM games WHERE scraped_at IS NOT NULL")->fetchColumn();
+    $total_divs     = (int)$pdo->query("SELECT COUNT(*) FROM divisions")->fetchColumn();
+    $total_teams    = (int)$pdo->query("SELECT COUNT(DISTINCT team) FROM misconducts")->fetchColumn();
+}
 
-$player_yellow_counts = $pdo->query("
-    SELECT m.player_name,
-           SUM(CASE WHEN m.card_type = 'Yellow'
-                     AND NOT EXISTS (
-                         SELECT 1 FROM misconducts m2
-                         WHERE m2.game_id = m.game_id
-                           AND m2.player_name = m.player_name
-                           AND m2.card_type = 'Red'
-                     ) THEN 1 ELSE 0 END) AS yellows,
-           SUM(CASE WHEN m.card_type = 'Red' THEN 1 ELSE 0 END) AS reds
-    FROM misconducts m
-    WHERE m.player_name != 'Bench Penalty'
-    GROUP BY m.player_name
-")->fetchAll();
+if ($current_org) {
+    $stmt = $pdo->prepare("
+        SELECT m.player_name,
+               SUM(CASE WHEN m.card_type = 'Yellow'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM misconducts m2
+                             WHERE m2.game_id = m.game_id
+                               AND m2.player_name = m.player_name
+                               AND m2.card_type = 'Red'
+                         ) THEN 1 ELSE 0 END) AS yellows,
+               SUM(CASE WHEN m.card_type = 'Red' THEN 1 ELSE 0 END) AS reds
+        FROM misconducts m
+        JOIN games g ON m.game_id = g.id
+        JOIN divisions d ON g.division_id = d.id
+        WHERE m.player_name != 'Bench Penalty' {$org_f['where']}
+        GROUP BY m.player_name
+    ");
+    $stmt->execute($org_f['params']);
+    $player_yellow_counts = $stmt->fetchAll();
+} else {
+    $player_yellow_counts = $pdo->query("
+        SELECT m.player_name,
+               SUM(CASE WHEN m.card_type = 'Yellow'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM misconducts m2
+                             WHERE m2.game_id = m.game_id
+                               AND m2.player_name = m.player_name
+                               AND m2.card_type = 'Red'
+                         ) THEN 1 ELSE 0 END) AS yellows,
+               SUM(CASE WHEN m.card_type = 'Red' THEN 1 ELSE 0 END) AS reds
+        FROM misconducts m
+        WHERE m.player_name != 'Bench Penalty'
+        GROUP BY m.player_name
+    ")->fetchAll();
+}
 
 $suspension_due_count = 0;
 foreach ($player_yellow_counts as $row) {
@@ -365,24 +431,49 @@ foreach ($player_yellow_counts as $row) {
 <!-- ── Most Dangerous Players ──────────────────────────────────────────────── -->
 <?php
 $w_sql_idx = weight_sql('m.reason', 'm.card_type', 'm.player_name');
-$danger_players = $pdo->query("
-    SELECT m.player_name,
-           GROUP_CONCAT(DISTINCT m.team) AS teams,
-           SUM(CASE WHEN m.card_type='Yellow'
-                     AND NOT EXISTS (
-                         SELECT 1 FROM misconducts m2
-                         WHERE m2.game_id = m.game_id
-                           AND m2.player_name = m.player_name
-                           AND m2.card_type = 'Red'
-                     ) THEN 1 ELSE 0 END) AS yellows,
-           SUM(CASE WHEN m.card_type='Red' THEN 1 ELSE 0 END) AS reds,
-           SUM($w_sql_idx) AS danger_weight
-    FROM misconducts m
-    WHERE m.player_name != 'Bench Penalty'
-    GROUP BY m.player_name
-    ORDER BY danger_weight DESC
-    LIMIT 10
-")->fetchAll();
+if ($current_org) {
+    $stmt = $pdo->prepare("
+        SELECT m.player_name,
+               GROUP_CONCAT(DISTINCT m.team) AS teams,
+               SUM(CASE WHEN m.card_type='Yellow'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM misconducts m2
+                             WHERE m2.game_id = m.game_id
+                               AND m2.player_name = m.player_name
+                               AND m2.card_type = 'Red'
+                         ) THEN 1 ELSE 0 END) AS yellows,
+               SUM(CASE WHEN m.card_type='Red' THEN 1 ELSE 0 END) AS reds,
+               SUM($w_sql_idx) AS danger_weight
+        FROM misconducts m
+        JOIN games g ON m.game_id = g.id
+        JOIN divisions d ON g.division_id = d.id
+        WHERE m.player_name != 'Bench Penalty' {$org_f['where']}
+        GROUP BY m.player_name
+        ORDER BY danger_weight DESC
+        LIMIT 10
+    ");
+    $stmt->execute($org_f['params']);
+    $danger_players = $stmt->fetchAll();
+} else {
+    $danger_players = $pdo->query("
+        SELECT m.player_name,
+               GROUP_CONCAT(DISTINCT m.team) AS teams,
+               SUM(CASE WHEN m.card_type='Yellow'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM misconducts m2
+                             WHERE m2.game_id = m.game_id
+                               AND m2.player_name = m.player_name
+                               AND m2.card_type = 'Red'
+                         ) THEN 1 ELSE 0 END) AS yellows,
+               SUM(CASE WHEN m.card_type='Red' THEN 1 ELSE 0 END) AS reds,
+               SUM($w_sql_idx) AS danger_weight
+        FROM misconducts m
+        WHERE m.player_name != 'Bench Penalty'
+        GROUP BY m.player_name
+        ORDER BY danger_weight DESC
+        LIMIT 10
+    ")->fetchAll();
+}
 $max_danger = !empty($danger_players) ? (float)$danger_players[0]['danger_weight'] : 1.0;
 ?>
 <?php if (!empty($danger_players)): ?>
@@ -404,7 +495,7 @@ $max_danger = !empty($danger_players) ? (float)$danger_players[0]['danger_weight
         <div class="flex items-center gap-3">
             <div class="w-5 text-xs text-gray-400 text-right shrink-0"><?= $i + 1 ?></div>
             <div class="w-32 sm:w-44 shrink-0">
-                <a href="player.php?name=<?= urlencode($dp['player_name']) ?>"
+                <a href="player.php?name=<?= urlencode($dp['player_name']) ?><?= club_param() ?>"
                    class="text-sm font-medium text-primary hover:underline truncate block">
                     <?= htmlspecialchars($dp['player_name']) ?>
                 </a>
@@ -436,16 +527,32 @@ $max_danger = !empty($danger_players) ? (float)$danger_players[0]['danger_weight
 
 <!-- ── Most Volatile Games ─────────────────────────────────────────────────── -->
 <?php
-$volatile_games = $pdo->query("
-    SELECT g.game_id, g.game_date, g.home_team, g.away_team,
-           d.name AS division_name, d.division_id, COUNT(m.id) AS cards
-    FROM games g
-    JOIN misconducts m ON m.game_id = g.id
-    JOIN divisions d ON g.division_id = d.id
-    GROUP BY g.id
-    ORDER BY cards DESC
-    LIMIT 10
-")->fetchAll();
+if ($current_org) {
+    $stmt = $pdo->prepare("
+        SELECT g.game_id, g.game_date, g.home_team, g.away_team,
+               d.name AS division_name, d.division_id, COUNT(m.id) AS cards
+        FROM games g
+        JOIN misconducts m ON m.game_id = g.id
+        JOIN divisions d ON g.division_id = d.id
+        WHERE 1=1 {$org_f['where']}
+        GROUP BY g.id
+        ORDER BY cards DESC
+        LIMIT 10
+    ");
+    $stmt->execute($org_f['params']);
+    $volatile_games = $stmt->fetchAll();
+} else {
+    $volatile_games = $pdo->query("
+        SELECT g.game_id, g.game_date, g.home_team, g.away_team,
+               d.name AS division_name, d.division_id, COUNT(m.id) AS cards
+        FROM games g
+        JOIN misconducts m ON m.game_id = g.id
+        JOIN divisions d ON g.division_id = d.id
+        GROUP BY g.id
+        ORDER BY cards DESC
+        LIMIT 10
+    ")->fetchAll();
+}
 ?>
 <?php if (!empty($volatile_games)): ?>
 <div class="mb-6">
@@ -467,7 +574,7 @@ $volatile_games = $pdo->query("
                     <td class="px-4 py-2 font-medium"><?= htmlspecialchars($vg['home_team']) ?></td>
                     <td class="px-4 py-2 font-medium"><?= htmlspecialchars($vg['away_team']) ?></td>
                     <td class="px-4 py-2">
-                        <a href="division.php?id=<?= (int)$vg['division_id'] ?>" class="text-primary hover:underline text-xs">
+                        <a href="division.php?id=<?= (int)$vg['division_id'] ?><?= club_param() ?>" class="text-primary hover:underline text-xs">
                             <?= htmlspecialchars($vg['division_name']) ?>
                         </a>
                     </td>
@@ -489,14 +596,30 @@ $volatile_games = $pdo->query("
 
 <!-- ── Misconduct Reason Breakdown ─────────────────────────────────────────── -->
 <?php
-$reason_rows = $pdo->query("
-    SELECT reason,
-           COUNT(*) AS cnt,
-           SUM(CASE WHEN card_type='Red' THEN 1 ELSE 0 END) AS red_cnt
-    FROM misconducts
-    GROUP BY reason
-    ORDER BY cnt DESC
-")->fetchAll();
+if ($current_org) {
+    $stmt = $pdo->prepare("
+        SELECT m.reason,
+               COUNT(*) AS cnt,
+               SUM(CASE WHEN m.card_type='Red' THEN 1 ELSE 0 END) AS red_cnt
+        FROM misconducts m
+        JOIN games g ON m.game_id = g.id
+        JOIN divisions d ON g.division_id = d.id
+        WHERE 1=1 {$org_f['where']}
+        GROUP BY m.reason
+        ORDER BY cnt DESC
+    ");
+    $stmt->execute($org_f['params']);
+    $reason_rows = $stmt->fetchAll();
+} else {
+    $reason_rows = $pdo->query("
+        SELECT reason,
+               COUNT(*) AS cnt,
+               SUM(CASE WHEN card_type='Red' THEN 1 ELSE 0 END) AS red_cnt
+        FROM misconducts
+        GROUP BY reason
+        ORDER BY cnt DESC
+    ")->fetchAll();
+}
 
 $reason_total = array_sum(array_column($reason_rows, 'cnt'));
 ?>
@@ -526,16 +649,32 @@ $reason_total = array_sum(array_column($reason_rows, 'cnt'));
 
 <!-- ── Recent Activity Feed ────────────────────────────────────────────────── -->
 <?php
-$recent_activity = $pdo->query("
-    SELECT m.player_name, m.card_type, m.reason, m.team,
-           g.game_date, g.game_id, g.id AS db_game_id,
-           d.name AS division_name, d.division_id
-    FROM misconducts m
-    JOIN games g ON m.game_id = g.id
-    JOIN divisions d ON g.division_id = d.id
-    ORDER BY g.id DESC, m.id DESC
-    LIMIT 10
-")->fetchAll();
+if ($current_org) {
+    $stmt = $pdo->prepare("
+        SELECT m.player_name, m.card_type, m.reason, m.team,
+               g.game_date, g.game_id, g.id AS db_game_id,
+               d.name AS division_name, d.division_id
+        FROM misconducts m
+        JOIN games g ON m.game_id = g.id
+        JOIN divisions d ON g.division_id = d.id
+        WHERE 1=1 {$org_f['where']}
+        ORDER BY g.id DESC, m.id DESC
+        LIMIT 10
+    ");
+    $stmt->execute($org_f['params']);
+    $recent_activity = $stmt->fetchAll();
+} else {
+    $recent_activity = $pdo->query("
+        SELECT m.player_name, m.card_type, m.reason, m.team,
+               g.game_date, g.game_id, g.id AS db_game_id,
+               d.name AS division_name, d.division_id
+        FROM misconducts m
+        JOIN games g ON m.game_id = g.id
+        JOIN divisions d ON g.division_id = d.id
+        ORDER BY g.id DESC, m.id DESC
+        LIMIT 10
+    ")->fetchAll();
+}
 ?>
 <?php if (!empty($recent_activity)): ?>
 <div class="mb-6">
@@ -551,16 +690,16 @@ $recent_activity = $pdo->query("
             </span>
             <div class="min-w-0">
                 <span class="font-medium">
-                    <a href="player.php?name=<?= urlencode($act['player_name']) ?>" class="text-primary hover:underline">
+                    <a href="player.php?name=<?= urlencode($act['player_name']) ?><?= club_param() ?>" class="text-primary hover:underline">
                         <?= htmlspecialchars($act['player_name']) ?>
                     </a>
                 </span>
                 <span class="text-gray-400 mx-1">&middot;</span>
-                <a href="team.php?name=<?= urlencode($act['team']) ?>" class="text-gray-600 hover:underline text-sm">
+                <a href="team.php?name=<?= urlencode($act['team']) ?><?= club_param() ?>" class="text-gray-600 hover:underline text-sm">
                     <?= htmlspecialchars($act['team']) ?>
                 </a>
                 <span class="text-gray-400 mx-1">&middot;</span>
-                <a href="division.php?id=<?= (int)$act['division_id'] ?>" class="text-gray-500 hover:underline text-xs">
+                <a href="division.php?id=<?= (int)$act['division_id'] ?><?= club_param() ?>" class="text-gray-500 hover:underline text-xs">
                     <?= htmlspecialchars($act['division_name']) ?>
                 </a>
                 <?php if (!empty($act['reason'])): ?>

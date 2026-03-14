@@ -18,6 +18,9 @@ try {
     exit;
 }
 
+$club_slug = $_GET['club'] ?? null;
+$current_org = $club_slug ? get_org($pdo, $club_slug) : null;
+
 switch ($action) {
     case 'players':
         echo json_encode(fetch_players($pdo), JSON_THROW_ON_ERROR);
@@ -55,6 +58,7 @@ function fetch_players(PDO $pdo): array {
                      ? (int) $_GET['max_yellows'] : null;
     $mode        = $_GET['mode'] ?? 'combined';
 
+    $org_f  = org_filter($GLOBALS['current_org'] ?? null);
     $params = [];
     $where  = [];
 
@@ -69,6 +73,10 @@ function fetch_players(PDO $pdo): array {
     if ($team_search !== '') {
         $where[]           = "m.team LIKE :team";
         $params[':team']   = '%' . $team_search . '%';
+    }
+    if ($org_f['where']) {
+        $where[] = ltrim($org_f['where'], ' AND ');
+        $params  = array_merge($params, $org_f['params']);
     }
 
     $where[] = "m.player_name != 'Bench Penalty'";
@@ -201,6 +209,10 @@ function fetch_players(PDO $pdo): array {
         $gw[] = 'd.division_id = :division_id';
         $gp[':division_id'] = $division_id;
     }
+    if ($org_f['where']) {
+        $gw[] = ltrim($org_f['where'], ' AND ');
+        $gp   = array_merge($gp, $org_f['params']);
+    }
     $gs = $pdo->prepare(
         "SELECT COUNT(*) FROM games g JOIN divisions d ON g.division_id = d.id WHERE " . implode(' AND ', $gw)
     );
@@ -224,15 +236,23 @@ function fetch_players(PDO $pdo): array {
 /* ------------------------------------------------------------------ */
 
 function handle_stats(PDO $pdo): void {
-    $totals = $pdo->query("
+    $org_f = org_filter($GLOBALS['current_org'] ?? null);
+    $org_join  = $org_f['where'] ? 'JOIN games g ON m.game_id = g.id JOIN divisions d ON g.division_id = d.id' : '';
+    $org_where = $org_f['where'] ? 'WHERE ' . ltrim($org_f['where'], ' AND ') : '';
+
+    $stmt = $pdo->prepare("
         SELECT
-            SUM(CASE WHEN card_type = 'Yellow' THEN 1 ELSE 0 END) AS total_yellows,
-            SUM(CASE WHEN card_type = 'Red'    THEN 1 ELSE 0 END) AS total_reds
-        FROM misconducts
-    ")->fetch();
+            SUM(CASE WHEN m.card_type = 'Yellow' THEN 1 ELSE 0 END) AS total_yellows,
+            SUM(CASE WHEN m.card_type = 'Red'    THEN 1 ELSE 0 END) AS total_reds
+        FROM misconducts m
+        {$org_join}
+        {$org_where}
+    ");
+    $stmt->execute($org_f['params']);
+    $totals = $stmt->fetch();
 
     /* Count players at a suspension threshold (yellow accumulation or red card) */
-    $players = $pdo->query("
+    $stmt2 = $pdo->prepare("
         SELECT m.player_name,
                SUM(CASE WHEN m.card_type = 'Yellow'
                          AND NOT EXISTS (
@@ -243,8 +263,12 @@ function handle_stats(PDO $pdo): void {
                          ) THEN 1 ELSE 0 END) AS yc,
                SUM(CASE WHEN m.card_type = 'Red' THEN 1 ELSE 0 END) AS rc
         FROM misconducts m
+        {$org_join}
+        {$org_where}
         GROUP BY m.player_name
-    ")->fetchAll();
+    ");
+    $stmt2->execute($org_f['params']);
+    $players = $stmt2->fetchAll();
 
     $suspension_due = 0;
     foreach ($players as $p) {
@@ -253,7 +277,11 @@ function handle_stats(PDO $pdo): void {
         }
     }
 
-    $last_scraped = $pdo->query("SELECT MAX(scraped_at) FROM games")->fetchColumn();
+    $game_join  = $org_f['where'] ? 'JOIN divisions d ON g.division_id = d.id' : '';
+    $game_where = $org_f['where'] ? 'WHERE ' . ltrim($org_f['where'], ' AND ') : '';
+    $stmt3 = $pdo->prepare("SELECT MAX(g.scraped_at) FROM games g {$game_join} {$game_where}");
+    $stmt3->execute($org_f['params']);
+    $last_scraped = $stmt3->fetchColumn();
 
     echo json_encode([
         'total_yellows'        => (int) ($totals['total_yellows'] ?? 0),
@@ -268,6 +296,7 @@ function handle_stats(PDO $pdo): void {
 /* ------------------------------------------------------------------ */
 
 function handle_teams(PDO $pdo): void {
+    $org_f       = org_filter($GLOBALS['current_org'] ?? null);
     $div_type    = $_GET['div_type'] ?? 'all';
     $division_id = isset($_GET['division_id']) && $_GET['division_id'] !== ''
                      ? (int) $_GET['division_id'] : null;
@@ -282,6 +311,10 @@ function handle_teams(PDO $pdo): void {
     if ($division_id !== null) {
         $where[]                 = "d.division_id = :division_id";
         $params[':division_id']  = $division_id;
+    }
+    if ($org_f['where']) {
+        $where[] = ltrim($org_f['where'], ' AND ');
+        $params  = array_merge($params, $org_f['params']);
     }
 
     $where_clause = $where ? 'WHERE ' . implode(' AND ', $where) : '';
@@ -340,10 +373,13 @@ function handle_teams(PDO $pdo): void {
 /* ------------------------------------------------------------------ */
 
 function handle_discrepancies(PDO $pdo): void {
-    $mode = $_GET['mode'] ?? 'combined';
+    $org_f = org_filter($GLOBALS['current_org'] ?? null);
+    $mode  = $_GET['mode'] ?? 'combined';
+
+    $org_where = $org_f['where'] ? 'WHERE ' . ltrim($org_f['where'], ' AND ') : '';
 
     /* Pre-filter: players with 3+ accumulation yellows OR any red card */
-    $stmt = $pdo->query("
+    $stmt = $pdo->prepare("
         SELECT
             m.player_name,
             GROUP_CONCAT(DISTINCT m.team)  AS teams,
@@ -359,10 +395,12 @@ function handle_discrepancies(PDO $pdo): void {
         FROM misconducts m
         JOIN games g      ON m.game_id     = g.id
         JOIN divisions d  ON g.division_id = d.id
+        {$org_where}
         GROUP BY m.player_name
         HAVING yc >= 3 OR rc >= 1
         ORDER BY yc DESC
     ");
+    $stmt->execute($org_f['params']);
 
     $result = [];
     foreach ($stmt->fetchAll() as $row) {

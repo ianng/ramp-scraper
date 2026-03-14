@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Indoor Soccer League Misconduct Scraper
+Indoor Soccer League Misconduct Scraper — Multi-Club
 Usage:
-    python scrape.py                     # Incremental scrape all divisions
-    python scrape.py --full              # Force re-scrape every game
-    python scrape.py --update            # Re-scrape stale future fixtures now in the past
-    python scrape.py --division 35372    # Single division only
-    python scrape.py --status            # Show DB stats, no scraping
+    python scrape.py                           # Incremental scrape all clubs
+    python scrape.py --club regina             # Scrape only FC Regina
+    python scrape.py --club saskatoon          # Scrape only Saskatoon
+    python scrape.py --full                    # Force re-scrape every game
+    python scrape.py --update                  # Re-scrape stale future fixtures
+    python scrape.py --division 35372          # Single division only
+    python scrape.py --status                  # Show DB stats, no scraping
 """
 
 import argparse
@@ -14,13 +16,12 @@ import re
 import sys
 import time
 from typing import Optional
-from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
 import db
-from config import BASE_URL, CATID, DIVISIONS, HEADERS, REQUEST_DELAY, ORG_ID, SEASON_IDS
+from config import CLUBS, HEADERS, REQUEST_DELAY, get_club, get_all_divisions
 
 
 # ---------------------------------------------------------------------------
@@ -59,22 +60,18 @@ def sleep():
 
 
 # ---------------------------------------------------------------------------
-# URL builders
+# URL builders (parameterized)
 # ---------------------------------------------------------------------------
 
-def games_url(division_id: int) -> str:
-    return f"{BASE_URL}/division/{CATID}/{division_id}/games"
-
-
-def gamesheet_url(division_id: int, game_id: int) -> str:
-    return f"{BASE_URL}/division/{CATID}/{division_id}/gamesheet/{game_id}"
+def gamesheet_url(base_url: str, catid: int, division_id: int, game_id: int) -> str:
+    return f"{base_url}/division/{catid}/{division_id}/gamesheet/{game_id}"
 
 
 # ---------------------------------------------------------------------------
 # Games list — fetched via RAMP JSON API
 # ---------------------------------------------------------------------------
 
-def fetch_games_for_division(division_id: int) -> list[dict]:
+def fetch_games_for_division(club: dict, catid: int, division_id: int) -> list[dict]:
     """
     Fetch all games for a division across all configured seasons using the
     RAMP JSON API: /api/leaguegame/get/{orgId}/{seasonId}/{catId}/{divId}/0/0/
@@ -82,9 +79,13 @@ def fetch_games_for_division(division_id: int) -> list[dict]:
     Returns list of dicts with keys:
         game_id, game_number, game_date, location, home_team, away_team, gamesheet_link
     """
+    base_url = club["base_url"]
+    org_id = club["org_id"]
     games = []
-    for season_id in SEASON_IDS:
-        url = f"{BASE_URL}/api/leaguegame/get/{ORG_ID}/{season_id}/{CATID}/{division_id}/0/0/"
+
+    extra = "/0" if club.get("api_extra_segment") else ""
+    for season_id in club["seasons"]:
+        url = f"{base_url}/api/leaguegame/get/{org_id}/{season_id}/{catid}/{division_id}/0/0{extra}"
         data = fetch_json(url)
         sleep()
         if not data:
@@ -103,7 +104,7 @@ def fetch_games_for_division(division_id: int) -> list[dict]:
                 "location": g.get("ArenaName") or "",
                 "home_team": home,
                 "away_team": away,
-                "gamesheet_link": f"{BASE_URL}/division/{CATID}/{division_id}/gamesheet/{gid}",
+                "gamesheet_link": gamesheet_url(base_url, catid, division_id, gid),
             })
     return games
 
@@ -113,46 +114,27 @@ def fetch_games_for_division(division_id: int) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def find_printable_url(soup: BeautifulSoup, gamesheet_page_url: str) -> Optional[str]:
-    """
-    Look for a printable/print link on the gamesheet page.
-    Common patterns:
-        <a href="...print...">Print</a>
-        <a href="...printable...">Printable Gamesheet</a>
-        <a class="print-btn" ...>
-    """
-    # Search all anchors for print-related text or href
+    from urllib.parse import urljoin
     for a in soup.find_all("a", href=True):
         href = a["href"]
         text = a.get_text(strip=True).lower()
         if "print" in href.lower() or "print" in text:
             return urljoin(gamesheet_page_url, href)
-
-    # Fallback: look for button with onclick containing print URL
     for btn in soup.find_all(["button", "input"], attrs={"onclick": True}):
         onclick = btn.get("onclick", "")
         m = re.search(r"(https?://[^\s'\"]+print[^\s'\"]*)", onclick)
         if m:
             return m.group(1)
-        # Relative URL in onclick
         m = re.search(r"window\.open\(['\"]([^'\"]+)['\"]", onclick)
         if m:
             url = m.group(1)
             if "print" in url.lower():
                 return urljoin(gamesheet_page_url, url)
-
     return None
 
 
 def parse_misconduct_table(soup: BeautifulSoup) -> list[dict]:
-    """
-    Parse the 'Time of Misconducts' table from a RAMP gamesheet page.
-
-    Each data row is a single cell containing inline text like:
-      "Cozmos 2at 00:00 -#22 Mike Collinsfor Unsporting Behavior [Yellow]"
-    """
     misconducts = []
-
-    # Find the table whose first row header contains "Misconduct"
     for table in soup.find_all("table"):
         first_row = table.find("tr")
         if not first_row:
@@ -160,7 +142,6 @@ def parse_misconduct_table(soup: BeautifulSoup) -> list[dict]:
         header_text = first_row.get_text(strip=True).lower()
         if "misconduct" not in header_text:
             continue
-        # Found the right table — parse data rows
         for row in table.find_all("tr")[1:]:
             cell_text = row.get_text(strip=True)
             if not cell_text or "no misconduct" in cell_text.lower():
@@ -168,14 +149,10 @@ def parse_misconduct_table(soup: BeautifulSoup) -> list[dict]:
             m = _parse_misconduct_line(cell_text)
             if m:
                 misconducts.append(m)
-        break  # Only one misconduct table per page
-
+        break
     return misconducts
 
 
-# RAMP inline misconduct format:
-#   "{Team}at {MM:SS} -#{num} {Name}for {Reason} [{Yellow|Red}]"
-# Note: no spaces before "at" or "for" — they run directly into the text
 _MISCONDUCT_RE = re.compile(
     r"^(.+?)at\s+(\d{1,2}:\d{2})\s+-\s*(?:#(\d+)\s+)?(.+?)for\s+(.+?)\s+\[(Yellow|Red)\]$",
     re.IGNORECASE,
@@ -197,27 +174,10 @@ def _parse_misconduct_line(text: str) -> Optional[dict]:
 
 
 def parse_suspensions_served(soup: BeautifulSoup) -> list[dict]:
-    """
-    Parse the Completed Suspensions section from a RAMP gamesheet page.
-    Returns list of {player_name, team}.
-
-    RAMP structure:
-        <h3>Completed Suspensions</h3>
-        <table ...>
-            <tr><td>Player Name</td></tr>   (one row per player)
-            ...
-        </table>
-    Empty case:
-        <table><tr><td>No Completed Suspensions</td></tr></table>
-
-    There is no team column — only the player name is present.
-    """
     suspensions = []
-
     for h3 in soup.find_all("h3"):
         if "completed suspension" not in h3.get_text(strip=True).lower():
             continue
-        # Find the immediately following table sibling
         table = h3.find_next_sibling("table")
         if not table:
             break
@@ -227,17 +187,11 @@ def parse_suspensions_served(soup: BeautifulSoup) -> list[dict]:
                 continue
             suspensions.append({"player_name": name, "team": ""})
         break
-
     return suspensions
 
 
 def parse_printable_gamesheet(soup: BeautifulSoup) -> list[dict]:
-    """
-    Parse suspended players from the printable gamesheet.
-    Returns list of {player_name, team}.
-    """
     suspended = []
-
     text = soup.get_text(separator="\n")
     in_section = False
     for line in text.splitlines():
@@ -247,27 +201,20 @@ def parse_printable_gamesheet(soup: BeautifulSoup) -> list[dict]:
             continue
         if in_section:
             if not stripped:
-                # Blank line might end section — but keep scanning a few more
                 continue
-            # If we hit another section header, stop
             if re.match(r"^[A-Z][A-Z\s]+:?\s*$", stripped) and len(stripped) > 20:
                 break
-            # Player entries often look like "Smith, John   TeamName"
-            # or "John Smith - TeamName"
             m = re.match(r"^([A-Za-z ,'\-\.]+?)\s{2,}(.+)$", stripped)
             if m:
                 suspended.append({
                     "player_name": m.group(1).strip(),
                     "team": m.group(2).strip(),
                 })
-
-    # Fallback: scan tables on printable page
     if not suspended:
         for table in soup.find_all("table"):
             header_text = " ".join(th.get_text(strip=True).lower() for th in table.find_all("th"))
             if "suspend" in header_text or "player" in header_text:
                 suspended.extend(_parse_suspension_rows(table))
-
     return suspended
 
 
@@ -279,17 +226,13 @@ def scrape_gamesheet(
     conn,
     game_pk: int,
     game_id: int,
+    base_url: str,
+    catid: int,
     division_id: int,
     force: bool,
     suspensions_only: bool = False,
 ) -> None:
-    """Scrape a single gamesheet and store results in DB.
-
-    suspensions_only: if True, skip misconduct parsing and only (re-)load
-                      the Completed Suspensions section.  Misconducts already
-                      in the DB are left untouched.
-    """
-    url = gamesheet_url(division_id, game_id)
+    url = gamesheet_url(base_url, catid, division_id, game_id)
     print(f"    Fetching gamesheet {game_id} …", end=" ", flush=True)
 
     soup = fetch(url)
@@ -315,7 +258,6 @@ def scrape_gamesheet(
             )
         misconduct_count = len(misconducts)
 
-    # Suspensions served (on this gamesheet)
     served = parse_suspensions_served(soup)
     for s in served:
         db.insert_suspension_served(conn, game_pk, s["player_name"], s["team"])
@@ -329,18 +271,19 @@ def scrape_gamesheet(
         print(f"OK ({misconduct_count} misconducts, {len(served)} suspensions)")
 
 
-def scrape_division(conn, division_id: int, force: bool = False) -> None:
-    info = DIVISIONS.get(division_id, {})
-    name = info.get("name", str(division_id))
-    print(f"\n[Division {division_id}] {name}")
+def scrape_division(conn, club: dict, div_id: int, div_info: dict, force: bool = False) -> None:
+    name = div_info.get("name", str(div_id))
+    catid = div_info["catid"]
+    base_url = club["base_url"]
+    print(f"\n[{club['name']}] [Division {div_id}] {name}")
 
-    games = fetch_games_for_division(division_id)
+    games = fetch_games_for_division(club, catid, div_id)
     print(f"  Found {len(games)} games via API.")
 
     for game in games:
         gid = game["game_id"]
         game_pk = db.upsert_game(
-            conn, gid, division_id,
+            conn, gid, div_id,
             game["game_number"], game["game_date"],
             game["location"], game["home_team"], game["away_team"],
         )
@@ -354,25 +297,16 @@ def scrape_division(conn, division_id: int, force: bool = False) -> None:
             print(f"    Game {gid} has no gamesheet link — skipping.")
             continue
 
-        scrape_gamesheet(conn, game_pk, gid, division_id, force)
+        scrape_gamesheet(conn, game_pk, gid, base_url, catid, div_id, force)
 
 
 # ---------------------------------------------------------------------------
 # Targeted suspension rescrape
 # ---------------------------------------------------------------------------
 
-def cmd_rescrape_suspensions(conn) -> None:
-    """
-    Re-scrape only the 'Completed Suspensions' section for games that
-    could contain suspension-served entries — i.e. games whose RAMP game_id
-    is >= the earliest game where any player triggered a threshold.
-
-    Misconduct data already in the DB is left untouched; only
-    suspensions_served rows are refreshed.
-    """
+def cmd_rescrape_suspensions(conn, club_slug: str | None = None) -> None:
     from collections import defaultdict
 
-    # Load all yellows per player ordered by game_id (proxy for chronology)
     rows = conn.execute("""
         SELECT m.player_name, g.game_id
         FROM misconducts m
@@ -385,7 +319,6 @@ def cmd_rescrape_suspensions(conn) -> None:
         print("No yellow card data in DB — run a full scrape first.")
         return
 
-    # Find the first game_id where each player hit a threshold (3, 5, 7+)
     player_games: dict[str, list[int]] = defaultdict(list)
     for row in rows:
         player_games[row["player_name"]].append(row["game_id"])
@@ -396,7 +329,7 @@ def cmd_rescrape_suspensions(conn) -> None:
             count = i + 1
             if count == 3 or count == 5 or count >= 7:
                 trigger_game_ids.append(gid)
-                break  # Only need the first trigger per player
+                break
 
     if not trigger_game_ids:
         print("No players have hit a suspension threshold yet.")
@@ -405,11 +338,12 @@ def cmd_rescrape_suspensions(conn) -> None:
     min_trigger_gid = min(trigger_game_ids)
     print(f"Earliest suspension trigger at RAMP game_id {min_trigger_gid}.")
 
-    # All games at or after that trigger
     games = conn.execute("""
-        SELECT g.id AS pk, g.game_id, d.division_id AS ext_div_id
+        SELECT g.id AS pk, g.game_id, d.division_id AS ext_div_id,
+               d.catid, o.base_url
         FROM games g
         JOIN divisions d ON g.division_id = d.id
+        JOIN organizations o ON d.org_id = o.id
         WHERE g.game_id >= ?
         ORDER BY g.game_id ASC
     """, (min_trigger_gid,)).fetchall()
@@ -423,35 +357,40 @@ def cmd_rescrape_suspensions(conn) -> None:
             conn,
             game["pk"],
             game["game_id"],
+            game["base_url"],
+            game["catid"],
             game["ext_div_id"],
             force=False,
             suspensions_only=True,
         )
 
     print("\nSuspension rescrape complete.")
-    cmd_status()
+    cmd_status(club_slug)
 
 
 # ---------------------------------------------------------------------------
 # Stale-game updater
 # ---------------------------------------------------------------------------
 
-def cmd_update_stale(conn) -> None:
-    """
-    Re-scrape games that were scraped before their game date — i.e., games
-    fetched when they were still future fixtures, so their gamesheets were
-    empty.  Clears existing (empty) data and re-scrapes each one.
-    """
-    stale = conn.execute("""
+def cmd_update_stale(conn, club_slug: str | None = None) -> None:
+    club_filter = ""
+    params: tuple = ()
+    if club_slug:
+        club_filter = "AND o.slug = ?"
+        params = (club_slug,)
+
+    stale = conn.execute(f"""
         SELECT g.id AS pk, g.game_id, d.division_id AS ext_div_id,
-               g.game_date, g.scraped_at
+               g.game_date, g.scraped_at, d.catid, o.base_url
         FROM games g
         JOIN divisions d ON g.division_id = d.id
+        JOIN organizations o ON d.org_id = o.id
         WHERE g.scraped_at IS NOT NULL
           AND date(g.game_date) <= date('now')
           AND date(g.scraped_at) < date(g.game_date)
+          {club_filter}
         ORDER BY g.game_date ASC
-    """).fetchall()
+    """, params).fetchall()
 
     if not stale:
         print("No stale games found — all scraped games were scraped on or after their game date.")
@@ -462,30 +401,35 @@ def cmd_update_stale(conn) -> None:
         print(f"  [{game['game_date']}] game_id={game['game_id']} (was scraped {game['scraped_at'][:10]})")
         db.delete_game_data(conn, game["pk"])
         conn.commit()
-        scrape_gamesheet(conn, game["pk"], game["game_id"], game["ext_div_id"], force=False)
+        scrape_gamesheet(conn, game["pk"], game["game_id"],
+                         game["base_url"], game["catid"], game["ext_div_id"], force=False)
 
     print("\nUpdate complete.")
-    cmd_status()
+    cmd_status(club_slug)
 
 
 # ---------------------------------------------------------------------------
 # Date-range rescrape
 # ---------------------------------------------------------------------------
 
-def cmd_rescrape_since(conn, since_date: str) -> None:
-    """
-    Re-scrape all games with game_date >= since_date.
-    Clears existing misconduct + suspension data and re-scrapes each gamesheet.
-    """
-    games = conn.execute("""
+def cmd_rescrape_since(conn, since_date: str, club_slug: str | None = None) -> None:
+    club_filter = ""
+    params: tuple = (since_date,)
+    if club_slug:
+        club_filter = "AND o.slug = ?"
+        params = (since_date, club_slug)
+
+    games = conn.execute(f"""
         SELECT g.id AS pk, g.game_id, d.division_id AS ext_div_id,
-               g.game_date, g.scraped_at
+               g.game_date, g.scraped_at, d.catid, o.base_url
         FROM games g
         JOIN divisions d ON g.division_id = d.id
+        JOIN organizations o ON d.org_id = o.id
         WHERE date(g.game_date) >= ?
           AND date(g.game_date) <= date('now')
+          {club_filter}
         ORDER BY g.game_date ASC
-    """, (since_date,)).fetchall()
+    """, params).fetchall()
 
     if not games:
         print(f"No games found on or after {since_date}.")
@@ -495,27 +439,35 @@ def cmd_rescrape_since(conn, since_date: str) -> None:
     for game in games:
         db.delete_game_data(conn, game["pk"])
         conn.commit()
-        scrape_gamesheet(conn, game["pk"], game["game_id"], game["ext_div_id"], force=False)
+        scrape_gamesheet(conn, game["pk"], game["game_id"],
+                         game["base_url"], game["catid"], game["ext_div_id"], force=False)
 
     print("\nRescrape complete.")
-    cmd_status()
+    cmd_status(club_slug)
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def cmd_status() -> None:
+def cmd_status(club_slug: str | None = None) -> None:
     conn = db.get_connection()
-    stats = db.get_stats(conn)
+    if club_slug:
+        stats = db.get_stats(conn, org_slug=club_slug)
+        label = club_slug.title()
+    else:
+        stats = db.get_stats(conn)
+        label = "All Clubs"
     conn.close()
-    print("\n=== Misconduct DB Status ===")
+    print(f"\n=== Misconduct DB Status ({label}) ===")
     for k, v in stats.items():
         print(f"  {k:25s}: {v}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Indoor Soccer League Misconduct Scraper")
+    parser.add_argument("--club", metavar="SLUG",
+                        help="Club slug (e.g. regina, saskatoon). Omit to scrape all clubs.")
     parser.add_argument("--full", action="store_true", help="Force re-scrape all games")
     parser.add_argument("--division", type=int, metavar="DIV_ID", help="Scrape a single division")
     parser.add_argument("--status", action="store_true", help="Show DB stats and exit")
@@ -538,31 +490,45 @@ def main() -> None:
     db.init_db()
 
     if args.status:
-        cmd_status()
+        cmd_status(args.club)
         return
 
     conn = db.get_connection()
 
     try:
         if args.update:
-            cmd_update_stale(conn)
+            cmd_update_stale(conn, args.club)
         elif args.rescrape_since:
-            cmd_rescrape_since(conn, args.rescrape_since)
+            cmd_rescrape_since(conn, args.rescrape_since, args.club)
         elif args.rescrape_suspensions:
-            cmd_rescrape_suspensions(conn)
-        elif args.division:
-            if args.division not in DIVISIONS:
-                print(f"Unknown division ID {args.division}. Valid IDs: {list(DIVISIONS)}")
-                sys.exit(1)
-            scrape_division(conn, args.division, force=args.full)
+            cmd_rescrape_suspensions(conn, args.club)
         else:
-            for div_id in DIVISIONS:
-                scrape_division(conn, div_id, force=args.full)
+            # Determine which clubs to scrape
+            if args.club:
+                clubs_to_scrape = {args.club: get_club(args.club)}
+            else:
+                clubs_to_scrape = CLUBS
+
+            for slug, club in clubs_to_scrape.items():
+                all_divs = get_all_divisions(club)
+
+                if not all_divs:
+                    print(f"\n[{club['name']}] No divisions configured — skipping.")
+                    continue
+
+                if args.division:
+                    if args.division not in all_divs:
+                        print(f"Division {args.division} not found in {club['name']}.")
+                        continue
+                    scrape_division(conn, club, args.division, all_divs[args.division], force=args.full)
+                else:
+                    for div_id, div_info in all_divs.items():
+                        scrape_division(conn, club, div_id, div_info, force=args.full)
     finally:
         conn.close()
 
     print("\nDone.")
-    cmd_status()
+    cmd_status(args.club)
 
 
 if __name__ == "__main__":

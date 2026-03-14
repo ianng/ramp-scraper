@@ -2,6 +2,8 @@
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/rules.php';
 
+$club_slug = $_GET['club'] ?? null;
+
 function fmt_date(string $iso): string {
     $ts = strtotime($iso);
     return $ts ? date('D, M j, Y', $ts) : htmlspecialchars($iso);
@@ -15,7 +17,7 @@ if ($player_name === '') {
     echo '<div class="bg-amber-50 border border-amber-300 text-amber-800 rounded-lg p-6 mt-4">';
     echo '<h2 class="text-xl font-bold mb-2">No player specified</h2>';
     echo '<p>Please provide a player name, e.g. <code>player.php?name=John+Doe</code></p>';
-    echo '<a href="index.php" class="inline-block mt-4 text-primary underline">&larr; Back to Dashboard</a>';
+    echo '<a href="index.php' . club_param_first() . '" class="inline-block mt-4 text-primary underline">&larr; Back to Dashboard</a>';
     echo '</div></main></body></html>';
     exit;
 }
@@ -172,10 +174,10 @@ $comp_class = $comp['fully_compliant'] ? 'bg-green-50 border-green-400 text-gree
         </div>
         <div class="flex flex-wrap gap-2 mt-2">
             <?php foreach (array_keys($teams) as $team): ?>
-                <a href="team.php?name=<?= urlencode($team) ?>" class="bg-primary/10 text-primary text-xs font-medium px-2.5 py-0.5 rounded hover:bg-primary/20 transition-colors"><?= htmlspecialchars($team) ?></a>
+                <a href="team.php?name=<?= urlencode($team) ?><?= club_param() ?>" class="bg-primary/10 text-primary text-xs font-medium px-2.5 py-0.5 rounded hover:bg-primary/20 transition-colors"><?= htmlspecialchars($team) ?></a>
             <?php endforeach; ?>
             <?php foreach ($divisions as $div => $div_id_val): ?>
-                <a href="division.php?id=<?= (int)$div_id_val ?>" class="bg-accent/20 text-green-900 text-xs font-medium px-2.5 py-0.5 rounded hover:bg-accent/40 transition-colors"><?= htmlspecialchars($div) ?></a>
+                <a href="division.php?id=<?= (int)$div_id_val ?><?= club_param() ?>" class="bg-accent/20 text-green-900 text-xs font-medium px-2.5 py-0.5 rounded hover:bg-accent/40 transition-colors"><?= htmlspecialchars($div) ?></a>
             <?php endforeach; ?>
         </div>
     </div>
@@ -264,11 +266,11 @@ $ptl_reds    = json_encode(array_values(array_column($player_timeline, 'r')));
 
 <!-- View Toggle -->
 <div class="mb-6 flex gap-1">
-    <a href="?name=<?= urlencode($player_name) ?>&mode=combined"
+    <a href="?name=<?= urlencode($player_name) ?>&mode=combined<?= club_param() ?>"
        class="px-4 py-2 rounded-t-lg text-sm font-medium <?= $mode === 'combined' ? 'bg-primary text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300' ?>">
         Combined
     </a>
-    <a href="?name=<?= urlencode($player_name) ?>&mode=per_division"
+    <a href="?name=<?= urlencode($player_name) ?>&mode=per_division<?= club_param() ?>"
        class="px-4 py-2 rounded-t-lg text-sm font-medium <?= $mode === 'per_division' ? 'bg-primary text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300' ?>">
         Per Division
     </a>
@@ -493,7 +495,7 @@ $ptl_reds    = json_encode(array_values(array_column($player_timeline, 'r')));
 
 
 <div class="mt-6 mb-4">
-    <a href="players.php" class="text-primary hover:underline">&larr; Back to Players</a>
+    <a href="players.php<?= club_param_first() ?>" class="text-primary hover:underline">&larr; Back to Players</a>
 </div>
 
 </main>
