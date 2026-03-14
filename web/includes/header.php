@@ -131,7 +131,7 @@ function nav_href(string $base): string {
         <?php if (count($all_orgs) > 1): ?>
         <!-- Club switcher -->
         <select id="club-switcher"
-                class="hidden md:block bg-white/10 text-white text-sm rounded px-2 py-1 border border-white/20 hover:bg-white/20 transition-colors cursor-pointer"
+                class="hidden md:block bg-white/10 text-white text-sm rounded px-2 py-1 border border-white/20 hover:bg-white/20 transition-colors cursor-pointer [&>option]:text-gray-900 [&>option]:bg-white"
                 onchange="switchClub(this.value)">
             <option value="" <?= !$club_slug ? 'selected' : '' ?>>All Clubs</option>
             <?php foreach ($all_orgs as $org): ?>
@@ -161,6 +161,7 @@ function nav_href(string $base): string {
             <a href="<?= nav_href('index.php?view=discrepancies') ?>" class="hover:text-accent transition-colors <?= nav_active('index.php', 'discrepancies') ?>">Discrepancies</a>
             <a href="<?= nav_href('scoring.php') ?>" class="hover:text-accent transition-colors <?= nav_active('scoring.php') ?>">Scoring Guide</a>
             <a href="<?= nav_href('report.php') ?>" class="hover:text-accent transition-colors <?= nav_active('report.php') ?>">Reports</a>
+            <a href="compare.php" class="hover:text-accent transition-colors <?= nav_active('compare.php') ?>">Compare</a>
         </div>
     </div>
     <!-- Mobile nav drawer -->
@@ -169,7 +170,7 @@ function nav_href(string $base): string {
             <?php if (count($all_orgs) > 1): ?>
             <div class="py-2.5 border-b border-white/10">
                 <select id="club-switcher-mobile"
-                        class="w-full bg-white/10 text-white text-sm rounded px-2 py-1.5 border border-white/20"
+                        class="w-full bg-white/10 text-white text-sm rounded px-2 py-1.5 border border-white/20 [&>option]:text-gray-900 [&>option]:bg-white"
                         onchange="switchClub(this.value)">
                     <option value="" <?= !$club_slug ? 'selected' : '' ?>>All Clubs</option>
                     <?php foreach ($all_orgs as $org): ?>
@@ -187,7 +188,8 @@ function nav_href(string $base): string {
             <a href="<?= nav_href('index.php?view=teams') ?>" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('index.php', 'teams') ?>">Discipline Rankings</a>
             <a href="<?= nav_href('index.php?view=discrepancies') ?>" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('index.php', 'discrepancies') ?>">Discrepancies</a>
             <a href="<?= nav_href('scoring.php') ?>" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('scoring.php') ?>">Scoring Guide</a>
-            <a href="<?= nav_href('report.php') ?>" class="py-2.5 hover:text-accent transition-colors <?= nav_active('report.php') ?>">Reports</a>
+            <a href="<?= nav_href('report.php') ?>" class="py-2.5 border-b border-white/10 hover:text-accent transition-colors <?= nav_active('report.php') ?>">Reports</a>
+            <a href="compare.php" class="py-2.5 hover:text-accent transition-colors <?= nav_active('compare.php') ?>">Compare</a>
         </div>
     </div>
 </nav>
