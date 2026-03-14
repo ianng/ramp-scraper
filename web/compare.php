@@ -284,6 +284,52 @@ foreach ($h2h_rows as $r) {
     ];
 }
 
+// Top 5 carded players per division
+$h2h_top_players_sql = "
+    SELECT d.division_id, m.player_name, COUNT(*) AS cards
+    FROM misconducts m
+    JOIN games g ON m.game_id = g.id
+    JOIN divisions d ON g.division_id = d.id
+    WHERE m.player_name != 'Bench Penalty'
+    GROUP BY d.division_id, m.player_name
+    ORDER BY d.division_id, cards DESC
+";
+$h2h_top_players_rows = $pdo->query($h2h_top_players_sql)->fetchAll();
+$h2h_top_players = [];
+foreach ($h2h_top_players_rows as $r) {
+    $did = (int)$r['division_id'];
+    if (!isset($h2h_top_players[$did])) $h2h_top_players[$did] = [];
+    if (count($h2h_top_players[$did]) < 5) {
+        $h2h_top_players[$did][] = ['name' => $r['player_name'], 'cards' => (int)$r['cards']];
+    }
+}
+
+// Top 3 misconduct reasons per division
+$h2h_top_reasons_sql = "
+    SELECT d.division_id, m.reason, COUNT(*) AS cnt
+    FROM misconducts m
+    JOIN games g ON m.game_id = g.id
+    JOIN divisions d ON g.division_id = d.id
+    GROUP BY d.division_id, m.reason
+    ORDER BY d.division_id, cnt DESC
+";
+$h2h_top_reasons_rows = $pdo->query($h2h_top_reasons_sql)->fetchAll();
+$h2h_top_reasons = [];
+foreach ($h2h_top_reasons_rows as $r) {
+    $did = (int)$r['division_id'];
+    if (!isset($h2h_top_reasons[$did])) $h2h_top_reasons[$did] = [];
+    if (count($h2h_top_reasons[$did]) < 3) {
+        $h2h_top_reasons[$did][] = ['reason' => $r['reason'], 'cnt' => (int)$r['cnt']];
+    }
+}
+
+// Attach top_players and top_reasons to h2h_json
+foreach ($h2h_json as $did => &$entry) {
+    $entry['top_players'] = $h2h_top_players[$did] ?? [];
+    $entry['top_reasons'] = $h2h_top_reasons[$did] ?? [];
+}
+unset($entry);
+
 // Build grouped option list for dropdowns: [org_name => [division_id => label]]
 $h2h_options = [];
 foreach ($h2h_rows as $r) {
@@ -367,6 +413,51 @@ foreach ($team_h2h_rows as $r) {
     $team_h2h_options[$r['org_name']][$key] = $r['team'] . ' (' . (int)$r['total_cards'] . ' cards)';
 }
 
+// Top 5 carded players per team (keyed by team|org_slug)
+$team_top_players_sql = "
+    SELECT m.team, o.slug AS org_slug, m.player_name, COUNT(*) AS cards
+    FROM misconducts m
+    JOIN games g ON m.game_id = g.id
+    JOIN divisions d ON g.division_id = d.id
+    JOIN organizations o ON d.org_id = o.id
+    WHERE m.player_name != 'Bench Penalty'
+    GROUP BY m.team, o.id, m.player_name
+    ORDER BY m.team, o.id, cards DESC
+";
+$team_top_players_rows = $pdo->query($team_top_players_sql)->fetchAll();
+$team_top_players = [];
+foreach ($team_top_players_rows as $r) {
+    $key = $r['team'] . '|' . $r['org_slug'];
+    if (!isset($team_top_players[$key])) $team_top_players[$key] = [];
+    if (count($team_top_players[$key]) < 5) {
+        $team_top_players[$key][] = ['name' => $r['player_name'], 'cards' => (int)$r['cards']];
+    }
+}
+
+// Divisions per team
+$team_divs_sql = "
+    SELECT DISTINCT m.team, o.slug AS org_slug, d.name AS div_name
+    FROM misconducts m
+    JOIN games g ON m.game_id = g.id
+    JOIN divisions d ON g.division_id = d.id
+    JOIN organizations o ON d.org_id = o.id
+    GROUP BY m.team, o.id, d.id
+";
+$team_divs_rows = $pdo->query($team_divs_sql)->fetchAll();
+$team_divs = [];
+foreach ($team_divs_rows as $r) {
+    $key = $r['team'] . '|' . $r['org_slug'];
+    if (!isset($team_divs[$key])) $team_divs[$key] = [];
+    $team_divs[$key][] = $r['div_name'];
+}
+
+// Attach to team_h2h_json
+foreach ($team_h2h_json as $key => &$entry) {
+    $entry['top_players'] = $team_top_players[$key] ?? [];
+    $entry['divisions'] = $team_divs[$key] ?? [];
+}
+unset($entry);
+
 // ── Section 6c: Player Head-to-Head ─────────────────────────────────────────
 $player_h2h_sql = "
     SELECT m.player_name, o.name AS org_name, o.slug AS org_slug,
@@ -407,6 +498,52 @@ foreach ($player_h2h_rows as $r) {
     ];
     $player_h2h_options[$r['org_name']][$key] = $r['player_name'] . ' (' . (int)$r['total_cards'] . ' cards)';
 }
+
+// Top 3 misconduct reasons per player
+$player_reasons_sql = "
+    SELECT m.player_name, o.slug AS org_slug, m.reason, COUNT(*) AS cnt
+    FROM misconducts m
+    JOIN games g ON m.game_id = g.id
+    JOIN divisions d ON g.division_id = d.id
+    JOIN organizations o ON d.org_id = o.id
+    WHERE m.player_name != 'Bench Penalty'
+    GROUP BY m.player_name, o.id, m.reason
+    ORDER BY m.player_name, o.id, cnt DESC
+";
+$player_reasons_rows = $pdo->query($player_reasons_sql)->fetchAll();
+$player_reasons = [];
+foreach ($player_reasons_rows as $r) {
+    $key = $r['player_name'] . '|' . $r['org_slug'];
+    if (!isset($player_reasons[$key])) $player_reasons[$key] = [];
+    if (count($player_reasons[$key]) < 3) {
+        $player_reasons[$key][] = ['reason' => $r['reason'], 'cnt' => (int)$r['cnt']];
+    }
+}
+
+// Divisions per player
+$player_divs_sql = "
+    SELECT DISTINCT m.player_name, o.slug AS org_slug, d.name AS div_name
+    FROM misconducts m
+    JOIN games g ON m.game_id = g.id
+    JOIN divisions d ON g.division_id = d.id
+    JOIN organizations o ON d.org_id = o.id
+    WHERE m.player_name != 'Bench Penalty'
+    GROUP BY m.player_name, o.id, d.id
+";
+$player_divs_rows = $pdo->query($player_divs_sql)->fetchAll();
+$player_divs = [];
+foreach ($player_divs_rows as $r) {
+    $key = $r['player_name'] . '|' . $r['org_slug'];
+    if (!isset($player_divs[$key])) $player_divs[$key] = [];
+    $player_divs[$key][] = $r['div_name'];
+}
+
+// Attach to player_h2h_json
+foreach ($player_h2h_json as $key => &$entry) {
+    $entry['reasons'] = $player_reasons[$key] ?? [];
+    $entry['divisions'] = $player_divs[$key] ?? [];
+}
+unset($entry);
 
 // ── Section 7: Quick facts — most common reason + hottest team per org ──────
 $reason_sql = "
@@ -655,31 +792,19 @@ foreach ($team_rows as $r) {
     <p class="text-sm text-gray-500 mb-4">Pick any two divisions — across clubs or within the same club — to compare side-by-side.</p>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-        <div>
+        <div class="relative">
             <label class="block text-xs font-medium text-gray-500 mb-1">Division A</label>
-            <select id="h2h-a" class="w-full border rounded px-3 py-2 text-sm" onchange="updateH2H()">
-                <option value="">Select a division…</option>
-                <?php foreach ($h2h_options as $org_name => $divs): ?>
-                <optgroup label="<?= htmlspecialchars($org_name) ?>">
-                    <?php foreach ($divs as $did => $label): ?>
-                    <option value="<?= (int)$did ?>"><?= htmlspecialchars($label) ?></option>
-                    <?php endforeach; ?>
-                </optgroup>
-                <?php endforeach; ?>
-            </select>
+            <input type="text" id="h2h-a-search" placeholder="Search divisions…" autocomplete="off"
+                   class="w-full border rounded px-3 py-2 text-sm">
+            <input type="hidden" id="h2h-a" value="">
+            <div id="h2h-a-dropdown" class="hidden absolute z-20 left-0 right-0 bg-white border rounded shadow-lg mt-1 max-h-60 overflow-y-auto text-sm"></div>
         </div>
-        <div>
+        <div class="relative">
             <label class="block text-xs font-medium text-gray-500 mb-1">Division B</label>
-            <select id="h2h-b" class="w-full border rounded px-3 py-2 text-sm" onchange="updateH2H()">
-                <option value="">Select a division…</option>
-                <?php foreach ($h2h_options as $org_name => $divs): ?>
-                <optgroup label="<?= htmlspecialchars($org_name) ?>">
-                    <?php foreach ($divs as $did => $label): ?>
-                    <option value="<?= (int)$did ?>"><?= htmlspecialchars($label) ?></option>
-                    <?php endforeach; ?>
-                </optgroup>
-                <?php endforeach; ?>
-            </select>
+            <input type="text" id="h2h-b-search" placeholder="Search divisions…" autocomplete="off"
+                   class="w-full border rounded px-3 py-2 text-sm">
+            <input type="hidden" id="h2h-b" value="">
+            <div id="h2h-b-dropdown" class="hidden absolute z-20 left-0 right-0 bg-white border rounded shadow-lg mt-1 max-h-60 overflow-y-auto text-sm"></div>
         </div>
     </div>
 
@@ -692,6 +817,12 @@ foreach ($team_rows as $r) {
                 <div>Games</div><div>Yellows</div><div>Reds</div><div>Bench</div><div>Cards/Game</div><div>Score/Game</div>
             </div>
             <div id="h2h-col-b" class="text-center p-4 border-l border-gray-100"></div>
+        </div>
+
+        <!-- Top players + reasons -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div id="h2h-extra-a" class="bg-white rounded-lg shadow p-4"></div>
+            <div id="h2h-extra-b" class="bg-white rounded-lg shadow p-4"></div>
         </div>
 
         <!-- Severity comparison bar -->
@@ -724,31 +855,19 @@ foreach ($team_rows as $r) {
     <p class="text-sm text-gray-500 mb-4">Compare any two teams — across clubs or within the same league.</p>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-        <div>
+        <div class="relative">
             <label class="block text-xs font-medium text-gray-500 mb-1">Team A</label>
-            <select id="th2h-a" class="w-full border rounded px-3 py-2 text-sm" onchange="updateTeamH2H()">
-                <option value="">Select a team…</option>
-                <?php foreach ($team_h2h_options as $org_name => $teams): ?>
-                <optgroup label="<?= htmlspecialchars($org_name) ?>">
-                    <?php foreach ($teams as $key => $label): ?>
-                    <option value="<?= htmlspecialchars($key) ?>"><?= htmlspecialchars($label) ?></option>
-                    <?php endforeach; ?>
-                </optgroup>
-                <?php endforeach; ?>
-            </select>
+            <input type="text" id="th2h-a-search" placeholder="Search teams…" autocomplete="off"
+                   class="w-full border rounded px-3 py-2 text-sm">
+            <input type="hidden" id="th2h-a" value="">
+            <div id="th2h-a-dropdown" class="hidden absolute z-20 left-0 right-0 bg-white border rounded shadow-lg mt-1 max-h-60 overflow-y-auto text-sm"></div>
         </div>
-        <div>
+        <div class="relative">
             <label class="block text-xs font-medium text-gray-500 mb-1">Team B</label>
-            <select id="th2h-b" class="w-full border rounded px-3 py-2 text-sm" onchange="updateTeamH2H()">
-                <option value="">Select a team…</option>
-                <?php foreach ($team_h2h_options as $org_name => $teams): ?>
-                <optgroup label="<?= htmlspecialchars($org_name) ?>">
-                    <?php foreach ($teams as $key => $label): ?>
-                    <option value="<?= htmlspecialchars($key) ?>"><?= htmlspecialchars($label) ?></option>
-                    <?php endforeach; ?>
-                </optgroup>
-                <?php endforeach; ?>
-            </select>
+            <input type="text" id="th2h-b-search" placeholder="Search teams…" autocomplete="off"
+                   class="w-full border rounded px-3 py-2 text-sm">
+            <input type="hidden" id="th2h-b" value="">
+            <div id="th2h-b-dropdown" class="hidden absolute z-20 left-0 right-0 bg-white border rounded shadow-lg mt-1 max-h-60 overflow-y-auto text-sm"></div>
         </div>
     </div>
 
@@ -759,6 +878,11 @@ foreach ($team_rows as $r) {
                 <div>Games w/ Cards</div><div>Players Carded</div><div>Yellows</div><div>Reds</div><div>Bench</div><div>Cards/Game</div><div>Score/Game</div>
             </div>
             <div id="th2h-col-b" class="text-center p-4 border-l border-gray-100"></div>
+        </div>
+        <!-- Top players per team -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div id="th2h-extra-a" class="bg-white rounded-lg shadow p-4"></div>
+            <div id="th2h-extra-b" class="bg-white rounded-lg shadow p-4"></div>
         </div>
         <div class="bg-white rounded-lg shadow p-4">
             <h3 class="text-sm font-semibold text-gray-600 mb-3">Severity Composition</h3>
@@ -780,41 +904,41 @@ foreach ($team_rows as $r) {
     <p class="text-sm text-gray-500 mb-4">Compare discipline records of any two players. Only players with 2+ cards shown.</p>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-        <div>
+        <div class="relative">
             <label class="block text-xs font-medium text-gray-500 mb-1">Player A</label>
-            <select id="ph2h-a" class="w-full border rounded px-3 py-2 text-sm" onchange="updatePlayerH2H()">
-                <option value="">Select a player…</option>
-                <?php foreach ($player_h2h_options as $org_name => $players): ?>
-                <optgroup label="<?= htmlspecialchars($org_name) ?>">
-                    <?php foreach ($players as $key => $label): ?>
-                    <option value="<?= htmlspecialchars($key) ?>"><?= htmlspecialchars($label) ?></option>
-                    <?php endforeach; ?>
-                </optgroup>
-                <?php endforeach; ?>
-            </select>
+            <input type="text" id="ph2h-a-search" placeholder="Search players…" autocomplete="off"
+                   class="w-full border rounded px-3 py-2 text-sm">
+            <input type="hidden" id="ph2h-a" value="">
+            <div id="ph2h-a-dropdown" class="hidden absolute z-20 left-0 right-0 bg-white border rounded shadow-lg mt-1 max-h-60 overflow-y-auto text-sm"></div>
         </div>
-        <div>
+        <div class="relative">
             <label class="block text-xs font-medium text-gray-500 mb-1">Player B</label>
-            <select id="ph2h-b" class="w-full border rounded px-3 py-2 text-sm" onchange="updatePlayerH2H()">
-                <option value="">Select a player…</option>
-                <?php foreach ($player_h2h_options as $org_name => $players): ?>
-                <optgroup label="<?= htmlspecialchars($org_name) ?>">
-                    <?php foreach ($players as $key => $label): ?>
-                    <option value="<?= htmlspecialchars($key) ?>"><?= htmlspecialchars($label) ?></option>
-                    <?php endforeach; ?>
-                </optgroup>
-                <?php endforeach; ?>
-            </select>
+            <input type="text" id="ph2h-b-search" placeholder="Search players…" autocomplete="off"
+                   class="w-full border rounded px-3 py-2 text-sm">
+            <input type="hidden" id="ph2h-b" value="">
+            <div id="ph2h-b-dropdown" class="hidden absolute z-20 left-0 right-0 bg-white border rounded shadow-lg mt-1 max-h-60 overflow-y-auto text-sm"></div>
         </div>
     </div>
 
     <div id="ph2h-panel" class="hidden">
-        <div class="grid grid-cols-3 gap-0 bg-white rounded-lg shadow overflow-hidden">
+        <div class="grid grid-cols-3 gap-0 bg-white rounded-lg shadow overflow-hidden mb-4">
             <div id="ph2h-col-a" class="text-center p-4 border-r border-gray-100"></div>
             <div class="text-center p-4 text-xs text-gray-400 font-semibold uppercase tracking-wide flex flex-col justify-center gap-3">
-                <div>Team(s)</div><div>Yellows</div><div>Reds</div><div>Total Cards</div><div>Danger Score</div>
+                <div>Team(s)</div><div>Divisions</div><div>Yellows</div><div>Reds</div><div>Total Cards</div><div>Danger Score</div>
             </div>
             <div id="ph2h-col-b" class="text-center p-4 border-l border-gray-100"></div>
+        </div>
+        <!-- Visual bar comparison + reasons -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div id="ph2h-extra-a" class="bg-white rounded-lg shadow p-4"></div>
+            <div id="ph2h-extra-b" class="bg-white rounded-lg shadow p-4"></div>
+        </div>
+        <!-- Side-by-side bars -->
+        <div id="ph2h-bars" class="bg-white rounded-lg shadow p-4">
+            <h3 class="text-sm font-semibold text-gray-600 mb-3">Card Comparison</h3>
+            <div style="position:relative; height:120px">
+                <canvas id="chart-ph2h-bars"></canvas>
+            </div>
         </div>
     </div>
     <div id="ph2h-empty" class="bg-gray-50 rounded-lg p-8 text-center text-gray-400">
@@ -1062,9 +1186,118 @@ const orgs = <?= json_encode(array_values(array_map(function ($row) use ($org_co
     });
 })();
 
+// ── Utility functions ─────────────────────────────────────────────────────────
+function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+
+function winClass(a, b, lowerIsBetter = true) {
+    if (a === b) return '';
+    if (lowerIsBetter) return a < b ? 'text-green-600' : 'text-red-600';
+    return a > b ? 'text-green-600' : 'text-red-600';
+}
+
+// ── Reusable Searchable Combobox ─────────────────────────────────────────────
+function createSearchableSelect(searchId, hiddenId, dropdownId, options, onSelect) {
+    const searchEl = document.getElementById(searchId);
+    const hiddenEl = document.getElementById(hiddenId);
+    const dropdownEl = document.getElementById(dropdownId);
+
+    function renderDropdown(query) {
+        const q = (query || '').toLowerCase();
+        // Group options
+        const groups = {};
+        options.forEach(o => {
+            if (q && !o.label.toLowerCase().includes(q)) return;
+            if (!groups[o.group]) groups[o.group] = [];
+            groups[o.group].push(o);
+        });
+
+        let html = '<div class="px-3 py-1.5 text-gray-400 hover:bg-gray-100 cursor-pointer border-b" data-value="">&times; Clear selection</div>';
+        const groupKeys = Object.keys(groups);
+        if (groupKeys.length === 0) {
+            html += '<div class="px-3 py-2 text-gray-400 italic">No matches</div>';
+        } else {
+            groupKeys.forEach(g => {
+                html += `<div class="px-3 py-1 text-xs font-bold text-gray-400 uppercase tracking-wide bg-gray-50 sticky top-0">${esc(g)}</div>`;
+                groups[g].forEach(o => {
+                    html += `<div class="px-3 py-1.5 hover:bg-blue-50 cursor-pointer" data-value="${esc(o.value)}" data-label="${esc(o.label)}">${esc(o.label)}</div>`;
+                });
+            });
+        }
+        dropdownEl.innerHTML = html;
+        dropdownEl.classList.remove('hidden');
+    }
+
+    searchEl.addEventListener('focus', () => renderDropdown(searchEl.value));
+    searchEl.addEventListener('input', () => renderDropdown(searchEl.value));
+
+    dropdownEl.addEventListener('mousedown', (e) => {
+        e.preventDefault(); // prevent blur
+        const item = e.target.closest('[data-value]');
+        if (!item) return;
+        const val = item.dataset.value;
+        const label = item.dataset.label || '';
+        hiddenEl.value = val;
+        searchEl.value = label;
+        dropdownEl.classList.add('hidden');
+        if (onSelect) onSelect(val);
+    });
+
+    searchEl.addEventListener('blur', () => {
+        setTimeout(() => dropdownEl.classList.add('hidden'), 150);
+    });
+}
+
+// ── Build option arrays from PHP data ────────────────────────────────────────
+const h2hOptions = <?= json_encode(array_values(call_user_func(function() use ($h2h_options) {
+    $out = [];
+    foreach ($h2h_options as $org_name => $divs) {
+        foreach ($divs as $did => $label) {
+            $out[] = ['value' => (string)$did, 'label' => $label, 'group' => $org_name];
+        }
+    }
+    return $out;
+}))) ?>;
+
+const teamH2HOptions = <?= json_encode(array_values(call_user_func(function() use ($team_h2h_options) {
+    $out = [];
+    foreach ($team_h2h_options as $org_name => $teams) {
+        foreach ($teams as $key => $label) {
+            $out[] = ['value' => $key, 'label' => $label, 'group' => $org_name];
+        }
+    }
+    return $out;
+}))) ?>;
+
+const playerH2HOptions = <?= json_encode(array_values(call_user_func(function() use ($player_h2h_options) {
+    $out = [];
+    foreach ($player_h2h_options as $org_name => $players) {
+        foreach ($players as $key => $label) {
+            $out[] = ['value' => $key, 'label' => $label, 'group' => $org_name];
+        }
+    }
+    return $out;
+}))) ?>;
+
+// Initialize all 6 searchable selects
+createSearchableSelect('h2h-a-search', 'h2h-a', 'h2h-a-dropdown', h2hOptions, () => updateH2H());
+createSearchableSelect('h2h-b-search', 'h2h-b', 'h2h-b-dropdown', h2hOptions, () => updateH2H());
+createSearchableSelect('th2h-a-search', 'th2h-a', 'th2h-a-dropdown', teamH2HOptions, () => updateTeamH2H());
+createSearchableSelect('th2h-b-search', 'th2h-b', 'th2h-b-dropdown', teamH2HOptions, () => updateTeamH2H());
+createSearchableSelect('ph2h-a-search', 'ph2h-a', 'ph2h-a-dropdown', playerH2HOptions, () => updatePlayerH2H());
+createSearchableSelect('ph2h-b-search', 'ph2h-b', 'ph2h-b-dropdown', playerH2HOptions, () => updatePlayerH2H());
+
 // ── Section 6: Division Head-to-Head ─────────────────────────────────────────
 const h2hData = <?= json_encode($h2h_json) ?>;
 let h2hChart = null;
+
+function renderTopList(title, items, nameKey, countKey, countLabel) {
+    if (!items || items.length === 0) return `<div class="text-xs text-gray-300 italic">No data</div>`;
+    let html = `<h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">${esc(title)}</h4><div class="space-y-1">`;
+    items.forEach((item, i) => {
+        html += `<div class="flex justify-between text-sm"><span class="text-gray-700">${i+1}. ${esc(item[nameKey])}</span><span class="font-semibold text-gray-500">${item[countKey]} ${countLabel}</span></div>`;
+    });
+    return html + '</div>';
+}
 
 function updateH2H() {
     const aId = document.getElementById('h2h-a').value;
@@ -1084,24 +1317,33 @@ function updateH2H() {
     panel.classList.remove('hidden');
     empty.classList.add('hidden');
 
-    // Build stat columns
-    function statCol(d, elId) {
-        const scoreColor = d.score > 2.5 ? 'text-red-600' : d.score >= 1.0 ? 'text-amber-600' : 'text-green-600';
+    // Build stat columns with winner highlighting
+    function statCol(d, other, elId) {
         document.getElementById(elId).innerHTML = `
             <div class="font-bold text-sm text-gray-800 mb-1">${esc(d.name)}</div>
             <div class="text-xs text-gray-400 mb-3">${esc(d.org)}</div>
             <div class="space-y-3">
                 <div class="text-lg font-bold text-blue-600">${d.games}</div>
                 <div class="text-lg font-bold text-amber-600">${d.yellows}</div>
-                <div class="text-lg font-bold text-red-600">${d.reds}</div>
-                <div class="text-lg font-bold text-orange-600">${d.bench}</div>
-                <div class="text-lg font-bold text-gray-800">${d.cpg.toFixed(2)}</div>
-                <div class="text-lg font-bold ${scoreColor}">${d.score.toFixed(2)}</div>
+                <div class="text-lg font-bold ${winClass(d.reds, other.reds, true)  || 'text-red-600'}">${d.reds}</div>
+                <div class="text-lg font-bold ${winClass(d.bench, other.bench, true) || 'text-orange-600'}">${d.bench}</div>
+                <div class="text-lg font-bold ${winClass(d.cpg, other.cpg, true) || 'text-gray-800'}">${d.cpg.toFixed(2)}</div>
+                <div class="text-lg font-bold ${winClass(d.score, other.score, true) || 'text-gray-800'}">${d.score.toFixed(2)}</div>
             </div>
         `;
     }
-    statCol(a, 'h2h-col-a');
-    statCol(b, 'h2h-col-b');
+    statCol(a, b, 'h2h-col-a');
+    statCol(b, a, 'h2h-col-b');
+
+    // Extra panels: top players + top reasons
+    function extraCol(d, elId) {
+        let html = renderTopList('Top 5 Carded Players', d.top_players, 'name', 'cards', 'cards');
+        html += '<div class="mt-3"></div>';
+        html += renderTopList('Top 3 Misconduct Reasons', d.top_reasons, 'reason', 'cnt', '');
+        document.getElementById(elId).innerHTML = html;
+    }
+    extraCol(a, 'h2h-extra-a');
+    extraCol(b, 'h2h-extra-b');
 
     // Severity stacked bar chart
     const sevKeys = ['proc_y', 'beh_y', 'dissent', 'two_y', 'hard_r', 'bench'];
@@ -1136,8 +1378,6 @@ function updateH2H() {
     });
 }
 
-function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
-
 // ── Section 6b: Team Head-to-Head ────────────────────────────────────────────
 const teamH2HData = <?= json_encode($team_h2h_json) ?>;
 let teamH2HChart = null;
@@ -1155,8 +1395,7 @@ function updateTeamH2H() {
     panel.classList.remove('hidden');
     empty.classList.add('hidden');
 
-    function teamCol(d, elId) {
-        const sc = d.score > 2.5 ? 'text-red-600' : d.score >= 1.0 ? 'text-amber-600' : 'text-green-600';
+    function teamCol(d, other, elId) {
         document.getElementById(elId).innerHTML = `
             <div class="font-bold text-sm text-gray-800 mb-1">${esc(d.name)}</div>
             <div class="text-xs text-gray-400 mb-3">${esc(d.org)}</div>
@@ -1164,14 +1403,27 @@ function updateTeamH2H() {
                 <div class="text-lg font-bold text-blue-600">${d.games}</div>
                 <div class="text-lg font-bold text-gray-700">${d.unique_players}</div>
                 <div class="text-lg font-bold text-amber-600">${d.yellows}</div>
-                <div class="text-lg font-bold text-red-600">${d.reds}</div>
-                <div class="text-lg font-bold text-orange-600">${d.bench}</div>
-                <div class="text-lg font-bold text-gray-800">${d.cpg.toFixed(2)}</div>
-                <div class="text-lg font-bold ${sc}">${d.score.toFixed(2)}</div>
+                <div class="text-lg font-bold ${winClass(d.reds, other.reds, true) || 'text-red-600'}">${d.reds}</div>
+                <div class="text-lg font-bold ${winClass(d.bench, other.bench, true) || 'text-orange-600'}">${d.bench}</div>
+                <div class="text-lg font-bold ${winClass(d.cpg, other.cpg, true) || 'text-gray-800'}">${d.cpg.toFixed(2)}</div>
+                <div class="text-lg font-bold ${winClass(d.score, other.score, true) || 'text-gray-800'}">${d.score.toFixed(2)}</div>
             </div>`;
     }
-    teamCol(a, 'th2h-col-a');
-    teamCol(b, 'th2h-col-b');
+    teamCol(a, b, 'th2h-col-a');
+    teamCol(b, a, 'th2h-col-b');
+
+    // Extra panels: top players + divisions
+    function teamExtraCol(d, elId) {
+        let html = '';
+        if (d.divisions && d.divisions.length > 0) {
+            html += `<h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Divisions</h4>`;
+            html += `<div class="text-sm text-gray-600 mb-3">${d.divisions.map(v => esc(v)).join(', ')}</div>`;
+        }
+        html += renderTopList('Top 5 Carded Players', d.top_players, 'name', 'cards', 'cards');
+        document.getElementById(elId).innerHTML = html;
+    }
+    teamExtraCol(a, 'th2h-extra-a');
+    teamExtraCol(b, 'th2h-extra-b');
 
     const sevKeys = ['proc_y', 'beh_y', 'dissent', 'two_y', 'hard_r', 'bench'];
     const sevLabels = ['Procedural', 'Behavioural', 'Dissent', 'Two-Yellow', 'Direct Red', 'Bench'];
@@ -1197,6 +1449,7 @@ function updateTeamH2H() {
 
 // ── Section 6c: Player Head-to-Head ──────────────────────────────────────────
 const playerH2HData = <?= json_encode($player_h2h_json) ?>;
+let playerH2HChart = null;
 
 function updatePlayerH2H() {
     const aKey = document.getElementById('ph2h-a').value;
@@ -1211,21 +1464,56 @@ function updatePlayerH2H() {
     panel.classList.remove('hidden');
     empty.classList.add('hidden');
 
-    function playerCol(d, elId) {
+    function playerCol(d, other, elId) {
         const dc = d.danger > 7.0 ? 'text-red-600' : d.danger >= 3.0 ? 'text-amber-600' : 'text-green-600';
+        const divsHtml = (d.divisions && d.divisions.length > 0) ? d.divisions.map(v => esc(v)).join(', ') : '-';
         document.getElementById(elId).innerHTML = `
             <div class="font-bold text-sm text-gray-800 mb-1">${esc(d.name)}</div>
             <div class="text-xs text-gray-400 mb-3">${esc(d.org)}</div>
             <div class="space-y-3">
                 <div class="text-sm text-gray-600">${esc(d.teams)}</div>
-                <div class="text-lg font-bold text-amber-600">${d.yellows}</div>
-                <div class="text-lg font-bold text-red-600">${d.reds}</div>
-                <div class="text-lg font-bold text-gray-800">${d.total_cards}</div>
-                <div class="text-lg font-bold ${dc}">${d.danger.toFixed(1)}</div>
+                <div class="text-sm text-gray-600">${divsHtml}</div>
+                <div class="text-lg font-bold ${winClass(d.yellows, other.yellows, true) || 'text-amber-600'}">${d.yellows}</div>
+                <div class="text-lg font-bold ${winClass(d.reds, other.reds, true) || 'text-red-600'}">${d.reds}</div>
+                <div class="text-lg font-bold ${winClass(d.total_cards, other.total_cards, true) || 'text-gray-800'}">${d.total_cards}</div>
+                <div class="text-lg font-bold ${winClass(d.danger, other.danger, true) || dc}">${d.danger.toFixed(1)}</div>
             </div>`;
     }
-    playerCol(a, 'ph2h-col-a');
-    playerCol(b, 'ph2h-col-b');
+    playerCol(a, b, 'ph2h-col-a');
+    playerCol(b, a, 'ph2h-col-b');
+
+    // Extra panels: reasons
+    function playerExtraCol(d, elId) {
+        let html = renderTopList('Top Misconduct Reasons', d.reasons, 'reason', 'cnt', '');
+        document.getElementById(elId).innerHTML = html;
+    }
+    playerExtraCol(a, 'ph2h-extra-a');
+    playerExtraCol(b, 'ph2h-extra-b');
+
+    // Side-by-side bar chart for yellows/reds
+    if (playerH2HChart) playerH2HChart.destroy();
+    playerH2HChart = new Chart(document.getElementById('chart-ph2h-bars'), {
+        type: 'bar',
+        data: {
+            labels: ['Yellows', 'Reds'],
+            datasets: [
+                { label: a.name, data: [a.yellows, a.reds], backgroundColor: '#6366f1', borderRadius: 3, barPercentage: 0.6 },
+                { label: b.name, data: [b.yellows, b.reds], backgroundColor: '#0d9488', borderRadius: 3, barPercentage: 0.6 },
+            ]
+        },
+        options: {
+            ...defaults,
+            indexAxis: 'y',
+            plugins: {
+                legend: { display: true, position: 'top', labels: { font: { size: 11 } } },
+                tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.x}` } }
+            },
+            scales: {
+                x: { beginAtZero: true, grid: { color: '#f3f4f6' } },
+                y: { grid: { display: false } }
+            }
+        }
+    });
 }
 </script>
 
